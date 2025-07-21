@@ -98,7 +98,7 @@ jobs:
 
       - name: Build services
         run: |
-          docker-compose build
+          docker compose build
 
       - name: Deploy to staging
         run: |
