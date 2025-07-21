@@ -1,0 +1,41 @@
+{
+  "name": "portfolio-management-system",
+  "version": "1.0.0",
+  "description": "Microservices-based Portfolio Management System",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "services/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"pnpm dev:frontend\" \"pnpm dev:services\"",
+    "dev:frontend": "cd frontend && pnpm dev",
+    "dev:services": "docker-compose up --build",
+    "build": "pnpm build:frontend && pnpm build:services",
+    "build:frontend": "cd frontend && pnpm build",
+    "build:services": "docker-compose build",
+    "clean": "pnpm clean:frontend && pnpm clean:services",
+    "clean:frontend": "cd frontend && rm -rf .next node_modules",
+    "clean:services": "docker-compose down -v --remove-orphans",
+    "setup": "pnpm install && pnpm setup:db && pnpm setup:services && pnpm setup:git",
+    "setup:db": "docker-compose up -d postgres redis",
+    "setup:services": "pnpm install:services",
+    "setup:git": "husky install && git config commit.template .gitmessage",
+    "install:services": "find services -name go.mod -execdir go mod download \\;",
+    "test": "pnpm test:frontend && pnpm test:services",
+    "test:frontend": "cd frontend && pnpm test",
+    "test:services": "find services -name go.mod -execdir go test ./... \\;",
+    "lint:commit": "commitlint --edit",
+    "prepare": "husky install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "@commitlint/cli": "^18.4.3",
+    "@commitlint/config-conventional": "^18.4.3",
+    "husky": "^8.0.3"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}
