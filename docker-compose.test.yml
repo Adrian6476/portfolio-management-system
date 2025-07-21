@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  # Test Database Services
+  postgres-test:
+    image: postgres:15-alpine
+    container_name: portfolio_postgres_test
+    environment:
+      POSTGRES_DB: portfolio_test_db
+      POSTGRES_USER: portfolio_user
+      POSTGRES_PASSWORD: portfolio_pass
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - portfolio_test_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portfolio_user -d portfolio_test_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-test:
+    image: redis:7-alpine
+    container_name: portfolio_redis_test
+    ports:
+      - "6380:6379"
+    networks:
+      - portfolio_test_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  nats-test:
+    image: nats:2.10-alpine
+    container_name: portfolio_nats_test
+    ports:
+      - "4223:4222"
+      - "8223:8222"
+    networks:
+      - portfolio_test_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8222/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # API Gateway for testing
+  api-gateway-test:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: portfolio_api_gateway_test
+    ports:
+      - "8090:8080"
+    environment:
+      - PORT=8080
+      - POSTGRES_URL=postgres://portfolio_user:portfolio_pass@postgres-test:5432/portfolio_test_db?sslmode=disable
+      - REDIS_URL=redis-test:6379
+      - NATS_URL=nats://nats-test:4222
+      - ENVIRONMENT=test
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+      nats-test:
+        condition: service_healthy
+    networks:
+      - portfolio_test_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  portfolio_test_network:
+    driver: bridge
