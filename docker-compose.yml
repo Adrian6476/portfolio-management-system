@@ -1,0 +1,187 @@
+version: '3.8'
+
+services:
+  # Database Services
+  postgres:
+    image: postgres:15-alpine
+    container_name: portfolio_postgres
+    environment:
+      POSTGRES_DB: portfolio_db
+      POSTGRES_USER: portfolio_user
+      POSTGRES_PASSWORD: portfolio_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - portfolio_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portfolio_user -d portfolio_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: portfolio_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - portfolio_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Message Broker
+  nats:
+    image: nats:2.10-alpine
+    container_name: portfolio_nats
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+      - "6222:6222"
+    networks:
+      - portfolio_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8222/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: portfolio_api_gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - POSTGRES_URL=postgres://portfolio_user:portfolio_pass@postgres:5432/portfolio_db?sslmode=disable
+      - REDIS_URL=redis:6379
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - portfolio_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["NONE"]
+      # Note: distroless images don't have shell/wget for health checks
+      # Health monitoring should be done externally via orchestrator
+
+  # User Portfolio Service
+  portfolio-service:
+    build:
+      context: ./services/portfolio-service
+      dockerfile: Dockerfile
+    container_name: portfolio_service
+    ports:
+      - "8081:8081"
+    environment:
+      - PORT=8081
+      - POSTGRES_URL=postgres://portfolio_user:portfolio_pass@postgres:5432/portfolio_db?sslmode=disable
+      - REDIS_URL=redis:6379
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - portfolio_network
+    restart: unless-stopped
+
+  # Market Data Service
+  market-data-service:
+    build:
+      context: ./services/market-data-service
+      dockerfile: Dockerfile
+    container_name: market_data_service
+    ports:
+      - "8082:8082"
+    environment:
+      - PORT=8082
+      - POSTGRES_URL=postgres://portfolio_user:portfolio_pass@postgres:5432/portfolio_db?sslmode=disable
+      - REDIS_URL=redis:6379
+      - NATS_URL=nats://nats:4222
+      - YAHOO_FINANCE_API_KEY=${YAHOO_FINANCE_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - portfolio_network
+    restart: unless-stopped
+
+  # Analytics Service
+  analytics-service:
+    build:
+      context: ./services/analytics-service
+      dockerfile: Dockerfile
+    container_name: analytics_service
+    ports:
+      - "8083:8083"
+    environment:
+      - PORT=8083
+      - POSTGRES_URL=postgres://portfolio_user:portfolio_pass@postgres:5432/portfolio_db?sslmode=disable
+      - REDIS_URL=redis:6379
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - portfolio_network
+    restart: unless-stopped
+
+  # Notification Service
+  notification-service:
+    build:
+      context: ./services/notification-service
+      dockerfile: Dockerfile
+    container_name: notification_service
+    ports:
+      - "8084:8084"
+    environment:
+      - PORT=8084
+      - POSTGRES_URL=postgres://portfolio_user:portfolio_pass@postgres:5432/portfolio_db?sslmode=disable
+      - REDIS_URL=redis:6379
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - portfolio_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  portfolio_network:
+    driver: bridge
