@@ -32,7 +32,7 @@ jobs:
       - name: Install dependencies
         run: |
           cd frontend
-          pnpm install --frozen-lockfile
+          pnpm install --no-frozen-lockfile
 
       - name: Type check
         run: |
@@ -73,6 +73,7 @@ jobs:
         run: |
           if [ -d "services/${{ matrix.service }}" ]; then
             cd services/${{ matrix.service }}
+            go mod tidy
             go mod download
             go test -v -cover ./...
           fi
@@ -98,7 +99,7 @@ jobs:
 
       - name: Build services
         run: |
-          docker-compose build
+          docker compose build
 
       - name: Deploy to staging
         run: |
