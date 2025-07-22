@@ -27,7 +27,7 @@ This system follows a microservices architecture with event-driven communication
 
 1. **Clone the repository**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/Adrian6476/portfolio-management-system.git
    cd portfolio-management-system
    ```
 
