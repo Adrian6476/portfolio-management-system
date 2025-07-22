@@ -32,6 +32,13 @@ func (h *Handler) HealthCheck(c *gin.Context) {
 
 // Portfolio handlers
 func (h *Handler) GetPortfolio(c *gin.Context) {
+	// Check if database connection is available
+	if h.services.DB == nil {
+		h.logger.Error("Database connection is nil")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch portfolio"})
+		return
+	}
+
 	// Get default user's portfolio holdings
 	query := `
 		SELECT
@@ -106,6 +113,13 @@ func (h *Handler) AddHolding(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&request); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Check if database connection is available
+	if h.services.DB == nil {
+		h.logger.Error("Database connection is nil")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user"})
 		return
 	}
 
