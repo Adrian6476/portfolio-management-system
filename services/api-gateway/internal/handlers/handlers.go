@@ -52,11 +52,11 @@ func (h *Handler) GetPortfolio(c *gin.Context) {
 		FROM portfolio_holdings ph
 		JOIN assets a ON ph.asset_id = a.id
 		JOIN users u ON ph.user_id = u.id
-		WHERE u.username = 'default_user'
+		WHERE u.username = $1
 		ORDER BY ph.created_at DESC
 	`
 
-	rows, err := h.services.DB.Query(query)
+	rows, err := h.services.DB.Query(query, "default_user")
 	if err != nil {
 		h.logger.Error("Failed to query portfolio", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch portfolio"})
@@ -125,7 +125,7 @@ func (h *Handler) AddHolding(c *gin.Context) {
 
 	// Get user ID
 	var userID string
-	err := h.services.DB.QueryRow("SELECT id FROM users WHERE username = 'default_user'").Scan(&userID)
+	err := h.services.DB.QueryRow("SELECT id FROM users WHERE username = $1", "default_user").Scan(&userID)
 	if err != nil {
 		h.logger.Error("Failed to get user ID", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user"})
