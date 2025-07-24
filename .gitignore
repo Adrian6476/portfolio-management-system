@@ -138,6 +138,8 @@ secrets.json
 # Example: coverage reports
 coverage/
 .nyc_output/
+*.out
+coverage.out
 
 # Project Discribtion
 Project Planning

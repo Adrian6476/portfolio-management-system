@@ -93,8 +93,138 @@ func (h *Handler) GetPortfolio(c *gin.Context) {
 }
 
 func (h *Handler) GetPortfolioSummary(c *gin.Context) {
+	// Check if database connection is available
+	if h.services.DB == nil {
+		h.logger.Error("Database connection is nil")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch portfolio summary"})
+		return
+	}
+
+	// Get user ID
+	var userID string
+	err := h.services.DB.QueryRow("SELECT id FROM users WHERE username = $1", "default_user").Scan(&userID)
+	if err != nil {
+		h.logger.Error("Failed to get user ID", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user"})
+		return
+	}
+
+	// Get portfolio summary data
+	query := `
+		SELECT
+			COUNT(*) as total_holdings,
+			COALESCE(SUM(ph.quantity * ph.average_cost), 0) as total_cost,
+			COALESCE(SUM(ph.quantity), 0) as total_shares
+		FROM portfolio_holdings ph
+		WHERE ph.user_id = $1
+	`
+
+	var totalHoldings int
+	var totalCost, totalShares float64
+	err = h.services.DB.QueryRow(query, userID).Scan(&totalHoldings, &totalCost, &totalShares)
+	if err != nil {
+		h.logger.Error("Failed to query portfolio summary", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch portfolio summary"})
+		return
+	}
+
+	// Get asset allocation by type
+	allocationQuery := `
+		SELECT
+			a.asset_type,
+			COUNT(*) as count,
+			COALESCE(SUM(ph.quantity * ph.average_cost), 0) as total_value
+		FROM portfolio_holdings ph
+		JOIN assets a ON ph.asset_id = a.id
+		WHERE ph.user_id = $1
+		GROUP BY a.asset_type
+		ORDER BY total_value DESC
+	`
+
+	rows, err := h.services.DB.Query(allocationQuery, userID)
+	if err != nil {
+		h.logger.Error("Failed to query asset allocation", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch portfolio summary"})
+		return
+	}
+	defer rows.Close()
+
+	var allocations []map[string]interface{}
+	for rows.Next() {
+		var assetType string
+		var count int
+		var totalValue float64
+
+		err := rows.Scan(&assetType, &count, &totalValue)
+		if err != nil {
+			h.logger.Error("Failed to scan allocation row", zap.Error(err))
+			continue
+		}
+
+		percentage := 0.0
+		if totalCost > 0 {
+			percentage = (totalValue / totalCost) * 100
+		}
+
+		allocations = append(allocations, map[string]interface{}{
+			"asset_type":  assetType,
+			"count":       count,
+			"total_value": totalValue,
+			"percentage":  percentage,
+		})
+	}
+
+	// Get top holdings
+	topHoldingsQuery := `
+		SELECT
+			a.symbol,
+			a.name,
+			ph.quantity,
+			ph.average_cost,
+			(ph.quantity * ph.average_cost) as total_value
+		FROM portfolio_holdings ph
+		JOIN assets a ON ph.asset_id = a.id
+		WHERE ph.user_id = $1
+		ORDER BY (ph.quantity * ph.average_cost) DESC
+		LIMIT 5
+	`
+
+	topRows, err := h.services.DB.Query(topHoldingsQuery, userID)
+	if err != nil {
+		h.logger.Error("Failed to query top holdings", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch portfolio summary"})
+		return
+	}
+	defer topRows.Close()
+
+	var topHoldings []map[string]interface{}
+	for topRows.Next() {
+		var symbol, name string
+		var quantity, averageCost, totalValue float64
+
+		err := topRows.Scan(&symbol, &name, &quantity, &averageCost, &totalValue)
+		if err != nil {
+			h.logger.Error("Failed to scan top holding row", zap.Error(err))
+			continue
+		}
+
+		topHoldings = append(topHoldings, map[string]interface{}{
+			"symbol":       symbol,
+			"name":         name,
+			"quantity":     quantity,
+			"average_cost": averageCost,
+			"total_value":  totalValue,
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Get portfolio summary - Coming Soon",
+		"summary": map[string]interface{}{
+			"total_holdings": totalHoldings,
+			"total_cost":     totalCost,
+			"total_shares":   totalShares,
+		},
+		"asset_allocation": allocations,
+		"top_holdings":     topHoldings,
 	})
 }
 
@@ -177,14 +307,159 @@ func (h *Handler) AddHolding(c *gin.Context) {
 }
 
 func (h *Handler) UpdateHolding(c *gin.Context) {
+	holdingID := c.Param("id")
+	if holdingID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Holding ID is required"})
+		return
+	}
+
+	var request struct {
+		Quantity    *float64 `json:"quantity" binding:"omitempty,gt=0"`
+		AverageCost *float64 `json:"average_cost" binding:"omitempty,gt=0"`
+	}
+
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Check if at least one field is provided for update
+	if request.Quantity == nil && request.AverageCost == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one field (quantity or average_cost) must be provided"})
+		return
+	}
+
+	// Check if database connection is available
+	if h.services.DB == nil {
+		h.logger.Error("Database connection is nil")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update holding"})
+		return
+	}
+
+	// Get user ID
+	var userID string
+	err := h.services.DB.QueryRow("SELECT id FROM users WHERE username = $1", "default_user").Scan(&userID)
+	if err != nil {
+		h.logger.Error("Failed to get user ID", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user"})
+		return
+	}
+
+	// Check if holding exists and belongs to the user
+	var existingQuantity, existingCost float64
+	var assetSymbol string
+	err = h.services.DB.QueryRow(`
+		SELECT ph.quantity, ph.average_cost, a.symbol
+		FROM portfolio_holdings ph
+		JOIN assets a ON ph.asset_id = a.id
+		WHERE ph.id = $1 AND ph.user_id = $2
+	`, holdingID, userID).Scan(&existingQuantity, &existingCost, &assetSymbol)
+	if err != nil {
+		h.logger.Error("Failed to find holding", zap.Error(err))
+		c.JSON(http.StatusNotFound, gin.H{"error": "Holding not found"})
+		return
+	}
+
+	// Prepare update values
+	newQuantity := existingQuantity
+	newCost := existingCost
+	if request.Quantity != nil {
+		newQuantity = *request.Quantity
+	}
+	if request.AverageCost != nil {
+		newCost = *request.AverageCost
+	}
+
+	// Update the holding
+	_, err = h.services.DB.Exec(`
+		UPDATE portfolio_holdings
+		SET quantity = $1, average_cost = $2, updated_at = NOW()
+		WHERE id = $3 AND user_id = $4
+	`, newQuantity, newCost, holdingID, userID)
+
+	if err != nil {
+		h.logger.Error("Failed to update holding", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update holding"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Update holding - Coming Soon",
+		"message":      "Holding updated successfully",
+		"id":           holdingID,
+		"symbol":       assetSymbol,
+		"quantity":     newQuantity,
+		"average_cost": newCost,
 	})
 }
 
 func (h *Handler) RemoveHolding(c *gin.Context) {
+	holdingID := c.Param("id")
+	if holdingID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Holding ID is required"})
+		return
+	}
+
+	// Check if database connection is available
+	if h.services.DB == nil {
+		h.logger.Error("Database connection is nil")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove holding"})
+		return
+	}
+
+	// Get user ID
+	var userID string
+	err := h.services.DB.QueryRow("SELECT id FROM users WHERE username = $1", "default_user").Scan(&userID)
+	if err != nil {
+		h.logger.Error("Failed to get user ID", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user"})
+		return
+	}
+
+	// Check if holding exists and belongs to the user, and get asset symbol for response
+	var assetSymbol string
+	var quantity float64
+	err = h.services.DB.QueryRow(`
+		SELECT a.symbol, ph.quantity
+		FROM portfolio_holdings ph
+		JOIN assets a ON ph.asset_id = a.id
+		WHERE ph.id = $1 AND ph.user_id = $2
+	`, holdingID, userID).Scan(&assetSymbol, &quantity)
+	if err != nil {
+		h.logger.Error("Failed to find holding", zap.Error(err))
+		c.JSON(http.StatusNotFound, gin.H{"error": "Holding not found"})
+		return
+	}
+
+	// Delete the holding
+	result, err := h.services.DB.Exec(`
+		DELETE FROM portfolio_holdings
+		WHERE id = $1 AND user_id = $2
+	`, holdingID, userID)
+
+	if err != nil {
+		h.logger.Error("Failed to delete holding", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove holding"})
+		return
+	}
+
+	// Check if any rows were affected
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		h.logger.Error("Failed to get rows affected", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove holding"})
+		return
+	}
+
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Holding not found"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Remove holding - Coming Soon",
+		"message":  "Holding removed successfully",
+		"id":       holdingID,
+		"symbol":   assetSymbol,
+		"quantity": quantity,
 	})
 }
 
