@@ -64,6 +64,9 @@ services:
       - POSTGRES_URL=postgres://portfolio_user:portfolio_pass@postgres:5432/portfolio_db?sslmode=disable
       - REDIS_URL=redis:6379
       - NATS_URL=nats://nats:4222
+      - FINNHUB_API_KEY=${FINNHUB_API_KEY}
+    env_file:
+      - .env
     depends_on:
       postgres:
         condition: service_healthy

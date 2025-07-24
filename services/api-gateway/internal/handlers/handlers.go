@@ -266,12 +266,22 @@ func (h *Handler) AddHolding(c *gin.Context) {
 	var assetID string
 	err = h.services.DB.QueryRow("SELECT id FROM assets WHERE symbol = $1", request.Symbol).Scan(&assetID)
 	if err != nil {
-		// Asset doesn't exist, create it with minimal info
+		// Asset doesn't exist, create it with real company data from Finnhub
+		assetName := request.Symbol // fallback to symbol
+		if h.services.Finnhub != nil {
+			if profile, err := h.services.Finnhub.GetCompanyProfile(request.Symbol); err == nil && profile.Name != "" {
+				assetName = profile.Name
+				h.logger.Info("Fetched company name from Finnhub", zap.String("symbol", request.Symbol), zap.String("name", assetName))
+			} else {
+				h.logger.Warn("Failed to fetch company profile from Finnhub, using symbol as name", zap.String("symbol", request.Symbol), zap.Error(err))
+			}
+		}
+
 		err = h.services.DB.QueryRow(`
 			INSERT INTO assets (symbol, name, asset_type, currency)
-			VALUES ($1, $1, 'STOCK', 'USD')
+			VALUES ($1, $2, 'STOCK', 'USD')
 			RETURNING id
-		`, request.Symbol).Scan(&assetID)
+		`, request.Symbol, assetName).Scan(&assetID)
 		if err != nil {
 			h.logger.Error("Failed to create asset", zap.Error(err))
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create asset"})
@@ -477,8 +487,34 @@ func (h *Handler) GetAsset(c *gin.Context) {
 }
 
 func (h *Handler) GetCurrentPrice(c *gin.Context) {
+	symbol := c.Param("symbol")
+	if symbol == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Symbol is required"})
+		return
+	}
+
+	if h.services.Finnhub == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Market data service not available"})
+		return
+	}
+
+	quote, err := h.services.Finnhub.GetQuote(symbol)
+	if err != nil {
+		h.logger.Error("Failed to fetch quote from Finnhub", zap.String("symbol", symbol), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch current price"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Get current price - Coming Soon",
+		"symbol":         symbol,
+		"current_price":  quote.CurrentPrice,
+		"change":         quote.Change,
+		"change_percent": quote.PercentChange,
+		"high":           quote.HighPriceOfDay,
+		"low":            quote.LowPriceOfDay,
+		"open":           quote.OpenPriceOfDay,
+		"previous_close": quote.PreviousClosePrice,
+		"timestamp":      quote.Timestamp,
 	})
 }
 

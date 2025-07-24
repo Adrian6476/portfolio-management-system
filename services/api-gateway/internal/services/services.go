@@ -5,18 +5,19 @@ import (
 	"fmt"
 
 	"github.com/go-redis/redis/v8"
-	"github.com/nats-io/nats.go"
 	_ "github.com/lib/pq"
+	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
 
 	"github.com/portfolio-management/api-gateway/internal/config"
 )
 
 type Services struct {
-	DB     *sql.DB
-	Redis  *redis.Client
-	NATS   *nats.Conn
-	Logger *zap.Logger
+	DB      *sql.DB
+	Redis   *redis.Client
+	NATS    *nats.Conn
+	Finnhub *FinnhubClient
+	Logger  *zap.Logger
 }
 
 func NewServices(cfg *config.Config, logger *zap.Logger) (*Services, error) {
@@ -48,6 +49,14 @@ func NewServices(cfg *config.Config, logger *zap.Logger) (*Services, error) {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 	services.NATS = nc
+
+	// Initialize Finnhub client
+	if cfg.FinnhubAPIKey != "" {
+		services.Finnhub = NewFinnhubClient(cfg.FinnhubAPIKey)
+		logger.Info("Finnhub client initialized")
+	} else {
+		logger.Warn("Finnhub API key not provided, market data features will be limited")
+	}
 
 	logger.Info("All services initialized successfully")
 	return services, nil
