@@ -47,6 +47,9 @@ yarn-error.log*
 pnpm-debug.log*
 .pnp.*
 
+# TypeScript build cache
+*.tsbuildinfo
+
 # --- Go ---
 # Compiled binaries
 *.exe
