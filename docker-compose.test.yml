@@ -3,7 +3,7 @@ version: '3.8'
 services:
   # Test Database Services
   postgres-test:
-    image: postgres:15-alpine
+    image: crpi-uq4h40nqjrf2s1wo.cn-qingdao.personal.cr.aliyuncs.com/ghcr_io/postgres:15-alpine
     container_name: portfolio_postgres_test
     environment:
       POSTGRES_DB: portfolio_test_db
@@ -22,7 +22,7 @@ services:
       retries: 5
 
   redis-test:
-    image: redis:7-alpine
+    image: crpi-uq4h40nqjrf2s1wo.cn-qingdao.personal.cr.aliyuncs.com/ghcr_io/redis:7-alpine
     container_name: portfolio_redis_test
     ports:
       - "6380:6379"
@@ -35,7 +35,7 @@ services:
       retries: 3
 
   nats-test:
-    image: nats:2.10-alpine
+    image: crpi-uq4h40nqjrf2s1wo.cn-qingdao.personal.cr.aliyuncs.com/ghcr_io/nats:2.10-alpine
     container_name: portfolio_nats_test
     ports:
       - "4223:4222"
