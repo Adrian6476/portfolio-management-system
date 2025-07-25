@@ -1,7 +1,7 @@
 services:
   # Database Services
   postgres:
-    image: postgres:15-alpine
+    image: crpi-uq4h40nqjrf2s1wo.cn-qingdao.personal.cr.aliyuncs.com/ghcr_io/postgres:15-alpine
     container_name: portfolio_postgres
     environment:
       POSTGRES_DB: portfolio_db
@@ -21,7 +21,7 @@ services:
       retries: 3
 
   redis:
-    image: redis:7-alpine
+    image: crpi-uq4h40nqjrf2s1wo.cn-qingdao.personal.cr.aliyuncs.com/ghcr_io/redis:7-alpine
     container_name: portfolio_redis
     ports:
       - "6379:6379"
@@ -37,7 +37,7 @@ services:
 
   # Message Broker
   nats:
-    image: nats:2.10-alpine
+    image: crpi-uq4h40nqjrf2s1wo.cn-qingdao.personal.cr.aliyuncs.com/ghcr_io/nats:2.10-alpine
     container_name: portfolio_nats
     ports:
       - "4222:4222"
