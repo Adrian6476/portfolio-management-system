@@ -1,8 +1,5 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  experimental: {
-    appDir: true,
-  },
   env: {
     API_GATEWAY_URL: process.env.API_GATEWAY_URL || 'http://localhost:8080',
     WS_URL: process.env.WS_URL || 'ws://localhost:8084',
@@ -29,6 +26,14 @@ const nextConfig = {
     ];
   },
   webpack: (config, { buildId, dev, isServer, defaultLoaders, nextRuntime, webpack }) => {
+    // Improve dependency resolution for pnpm workspaces
+    config.resolve.symlinks = false;
+    
+    // Add fallbacks for better module resolution
+    config.resolve.fallback = {
+      ...config.resolve.fallback,
+    };
+
     // Important: return the modified config
     return config;
   },

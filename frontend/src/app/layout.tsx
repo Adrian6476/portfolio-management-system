@@ -1,5 +1,5 @@
 import React from 'react'
-import type { Metadata } from 'next'
+import type { Metadata, Viewport } from 'next'
 import { Inter } from 'next/font/google'
 import './globals.css'
 
@@ -10,7 +10,11 @@ export const metadata: Metadata = {
   description: 'Advanced microservices-based portfolio management platform',
   keywords: ['portfolio', 'investment', 'finance', 'trading', 'analytics'],
   authors: [{ name: 'Portfolio Management Team' }],
-  viewport: 'width=device-width, initial-scale=1',
+}
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
   themeColor: [
     { media: '(prefers-color-scheme: light)', color: 'white' },
     { media: '(prefers-color-scheme: dark)', color: 'black' },

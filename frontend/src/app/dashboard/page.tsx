@@ -1,10 +1,21 @@
-// This is the main page for the portfolio dashboard.
-// Developer A will implement the layout and integrate the components here.
-export default function DashboardPage() {
+// This file is now obsolete - dashboard functionality moved to root (/)
+// Redirect to root if someone navigates to /dashboard
+
+'use client'
+
+import { useEffect } from 'react'
+import { useRouter } from 'next/navigation'
+
+export default function DashboardRedirect() {
+  const router = useRouter()
+  
+  useEffect(() => {
+    router.replace('/')
+  }, [router])
+
   return (
-    <div>
-      <h1>Portfolio Dashboard</h1>
-      {/* Components will be added here */}
+    <div className="flex items-center justify-center min-h-screen bg-gray-50">
+      <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-primary"></div>
     </div>
-  );
+  )
 }
