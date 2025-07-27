@@ -4,65 +4,72 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    /* Bank Color System - Based on Brand Red #DB0011 */
+    --background: 220 5% 98%; /* Global Background HSB(220, 5, 98) */
+    --foreground: 0 0% 20%; /* Text HSB(0, 0, 20) */
 
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card: 220 3% 100%; /* Card Background HSB(220, 3, 100) */
+    --card-foreground: 0 0% 20%;
 
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
+    --popover: 220 3% 100%;
+    --popover-foreground: 0 0% 20%;
 
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
+    /* Bank Red Primary Color - HSB(355°, 100%, 86%) = #DB0011 */
+    --primary: 355 100% 43%; /* Adjusted for HSL */
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 210 40% 96%;
-    --secondary-foreground: 222.2 84% 4.9%;
+    --secondary: 220 10% 90%;
+    --secondary-foreground: 0 0% 20%;
 
-    --muted: 210 40% 96%;
-    --muted-foreground: 215.4 16.3% 46.9%;
+    --muted: 220 5% 95%;
+    --muted-foreground: 0 0% 40%; /* Body Text HSB(0, 0, 40) */
 
-    --accent: 210 40% 96%;
-    --accent-foreground: 222.2 84% 4.9%;
+    --accent: 220 10% 95%;
+    --accent-foreground: 0 0% 20%;
 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 5 85% 60%; /* Error HSB(5, 85, 90) adjusted */
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
+    --border: 0 0% 90%; /* Emphasized Divider HSB(0, 0, 90) */
+    --input: 0 0% 95%;
+    --ring: 355 100% 43%;
 
-    --radius: 0.5rem;
+    --radius: 0.75rem;
+
+    /* Bank specific colors */
+    --success: 120 85% 40%; /* Success HSB(120, 85, 80) adjusted */
+    --warning: 45 90% 60%; /* Warning HSB(45, 90, 95) adjusted */
+    --info: 210 70% 50%; /* Information HSB(210, 70, 90) adjusted */
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
+    --background: 0 0% 7%; /* Dark background */
+    --foreground: 0 0% 95%;
 
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
+    --card: 0 0% 9%;
+    --card-foreground: 0 0% 95%;
 
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
+    --popover: 0 0% 9%;
+    --popover-foreground: 0 0% 95%;
 
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
+    --primary: 355 85% 50%; /* Dark mode primary - reduced saturation */
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
+    --secondary: 220 15% 15%;
+    --secondary-foreground: 0 0% 90%;
 
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
+    --muted: 220 10% 12%;
+    --muted-foreground: 0 0% 65%;
 
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
+    --accent: 220 15% 15%;
+    --accent-foreground: 0 0% 90%;
 
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 5 70% 55%;
+    --destructive-foreground: 0 0% 95%;
 
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 212.7 26.8% 83.9%;
+    --border: 220 10% 18%;
+    --input: 220 10% 18%;
+    --ring: 355 85% 50%;
   }
 }
 
@@ -75,14 +82,14 @@
   }
 }
 
-/* Custom portfolio styles */
+/* Custom portfolio styles - Bank Design System */
 @layer utilities {
   .text-gradient {
-    @apply bg-clip-text text-transparent bg-gradient-to-r from-primary to-blue-600;
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-primary to-red-600;
   }
   
   .card-hover {
-    @apply transition-all duration-200 hover:shadow-lg hover:-translate-y-1;
+    @apply transition-all duration-300 hover:shadow-xl hover:-translate-y-0.5;
   }
   
   .chart-container {
@@ -94,7 +101,43 @@
   }
   
   .metric-card {
-    @apply p-6 rounded-lg border bg-card text-card-foreground shadow-sm;
+    @apply p-6 rounded-xl border bg-card text-card-foreground shadow-sm backdrop-blur-sm;
+  }
+
+  .bank-card {
+    @apply p-8 rounded-2xl bg-white shadow-lg border border-gray-100 hover:shadow-xl transition-all duration-300;
+  }
+
+  .bank-sidebar {
+    @apply bg-slate-900 text-white min-h-screen w-20 flex flex-col items-center py-8;
+  }
+
+  .bank-nav-item {
+    @apply w-12 h-12 rounded-xl bg-slate-800 hover:bg-primary transition-colors duration-200 flex items-center justify-center mb-4;
+  }
+
+  .bank-header {
+    @apply flex items-center justify-between p-6 bg-white border-b border-gray-100;
+  }
+
+  .bank-main-content {
+    @apply flex-1 bg-gray-50 p-8;
+  }
+
+  .metric-value {
+    @apply text-4xl font-bold text-gray-900 mb-2;
+  }
+
+  .metric-label {
+    @apply text-sm font-medium text-gray-500 uppercase tracking-wide;
+  }
+
+  .percentage-positive {
+    @apply text-green-600 font-semibold;
+  }
+
+  .percentage-negative {
+    @apply text-red-600 font-semibold;
   }
 }
 
