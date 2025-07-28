@@ -2,19 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import DashboardLayout from '../components/DashboardLayout'
-
-// Placeholder components for developers
-function PortfolioSummaryPlaceholder() {
-  return (
-    <div className="bank-card min-h-[200px] flex items-center justify-center">
-      <div className="text-center">
-        <h3 className="text-lg font-semibold text-gray-900 mb-2">Portfolio Summary</h3>
-        <p className="text-gray-500">Developer A will implement this component</p>
-        <div className="text-xs text-gray-400 mt-2">API: GET /api/v1/portfolio/summary</div>
-      </div>
-    </div>
-  )
-}
+import PortfolioSummary from '../components/PortfolioSummary'
 
 function HoldingsTablePlaceholder() {
   return (
@@ -76,7 +64,7 @@ export default function HomePage() {
         return (
           <div className="space-y-6">
             {/* Portfolio Summary - Full Width */}
-            <PortfolioSummaryPlaceholder />
+            <PortfolioSummary />
             
             {/* Holdings Table - Full Width */}
             <HoldingsTablePlaceholder />
@@ -97,7 +85,7 @@ export default function HomePage() {
             {/* Add Form */}
             <AddHoldingFormPlaceholder />
             {/* Portfolio Summary for context */}
-            <PortfolioSummaryPlaceholder />
+            <PortfolioSummary />
           </div>
         )
       
@@ -107,7 +95,7 @@ export default function HomePage() {
             {/* Chart gets more space */}
             <PortfolioChartPlaceholder />
             {/* Summary for context */}
-            <PortfolioSummaryPlaceholder />
+            <PortfolioSummary />
           </div>
         )
       
@@ -131,8 +119,8 @@ export default function HomePage() {
                 <ul className="text-sm text-blue-700 space-y-1">
                   <li>✅ TypeScript interfaces defined</li>
                   <li>✅ API client configured</li>
-                  <li>🔄 Portfolio Summary component</li>
-                  <li>🔄 Dashboard layout integration</li>
+                  <li>✅ Portfolio Summary component</li>
+                  <li>✅ Dashboard layout integration</li>
                 </ul>
               </div>
               <div className="p-4 bg-green-50 rounded-lg border border-green-200">
