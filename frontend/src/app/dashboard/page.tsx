@@ -1,6 +1,7 @@
 'use client'
 
 import PortfolioSummary from '@/components/PortfolioSummary'
+import HoldingsTable from '@/components/HoldingsTable'
 
 export default function DashboardPage() {
   return (
@@ -15,11 +16,11 @@ export default function DashboardPage() {
             <PortfolioSummary />
           </div>
           
-          {/* Placeholders for other components that teammates will build */}
+          {/* Holdings Table */}
           <div className="lg:col-span-2">
-            <div className="bg-white rounded-lg shadow p-6 h-96">
+            <div className="bg-white rounded-lg shadow p-6">
               <h2 className="text-xl font-semibold text-gray-800 mb-4">Holdings Table</h2>
-              <p className="text-gray-500">Component will be implemented by Developer B</p>
+              <HoldingsTable />
             </div>
           </div>
           

@@ -13,7 +13,7 @@ export const usePortfolioHoldings = () => {
   return useQuery<PortfolioResponse, Error>(
     QUERY_KEYS.PORTFOLIO_HOLDINGS,
     async () => {
-      const { data } = await apiClient.get('/portfolio');
+      const { data } = await apiClient.get('/portfolio/');
       return data;
     },
     {
