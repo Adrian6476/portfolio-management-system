@@ -75,27 +75,15 @@ describe('Dashboard Page', () => {
     expect(screen.getByTestId('active-view')).toHaveTextContent('overview')
   })
 
-  it('renders placeholder components in overview', () => {
+  it('renders PortfolioSummary in overview', () => {
     renderWithQueryClient(<Page />)
-    
-    // In overview view, only Developer A and B components are shown
-    expect(screen.getByText('Developer A will implement this component')).toBeInTheDocument()
-    expect(screen.getByText('Developer B will implement this component')).toBeInTheDocument()
-    
-    // Developer C components are not in overview view
-    expect(screen.queryByText('Developer C will implement this component')).not.toBeInTheDocument()
+    expect(screen.getByTestId('portfolio-summary')).toBeInTheDocument()
   })
 
-  it('shows all developer components across different views', () => {
+  it('does not show Developer C components in overview view', () => {
     renderWithQueryClient(<Page />)
-    
-    // Start in overview - should have A and B
-    expect(screen.getByText('Developer A will implement this component')).toBeInTheDocument()
-    expect(screen.getByText('Developer B will implement this component')).toBeInTheDocument()
-    
-    // The test validates that the overview correctly shows the expected components
-    // Developer C components appear in 'add' and 'analytics' views which would be tested
-    // when implementing actual navigation functionality
+    expect(screen.queryByTestId('add-holding-form')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('portfolio-chart')).not.toBeInTheDocument()
   })
 
   it('renders development status section in overview', () => {

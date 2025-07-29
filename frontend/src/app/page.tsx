@@ -4,18 +4,26 @@ import { useEffect, useState } from 'react'
 import DashboardLayout from '../components/DashboardLayout'
 import PortfolioSummary from '../components/PortfolioSummary'
 
+import dynamic from 'next/dynamic';
+
+const HoldingsTable = dynamic(
+  () => import('../components/HoldingsTable'),
+  {
+    loading: () => (
+      <div className="bank-card min-h-[400px] flex items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
+      </div>
+    ),
+    ssr: false
+  }
+);
+
 function HoldingsTablePlaceholder() {
   return (
-    <div className="bank-card min-h-[400px] flex items-center justify-center">
-      <div className="text-center">
-        <h3 className="text-lg font-semibold text-gray-900 mb-2">Holdings Table</h3>
-        <p className="text-gray-500">Developer B will implement this component</p>
-        <div className="text-xs text-gray-400 mt-2">
-          API: GET /api/v1/portfolio, PUT/DELETE /api/v1/portfolio/holdings/:id
-        </div>
-      </div>
+    <div className="bank-card min-h-[400px]">
+      <HoldingsTable />
     </div>
-  )
+  );
 }
 
 function AddHoldingFormPlaceholder() {
@@ -126,10 +134,10 @@ export default function HomePage() {
               <div className="p-4 bg-green-50 rounded-lg border border-green-200">
                 <h4 className="font-medium text-green-900 mb-2">Developer B Tasks</h4>
                 <ul className="text-sm text-green-700 space-y-1">
-                  <li>⏳ Holdings data fetching hooks</li>
-                  <li>⏳ Interactive holdings table</li>
-                  <li>⏳ CRUD operations</li>
-                  <li>⏳ Real-time price integration</li>
+                  <li>✅ Holdings data fetching hooks</li>
+                  <li>✅ Interactive holdings table</li>
+                  <li>✅ CRUD operations</li>
+                  <li>✅ Real-time price integration</li>
                 </ul>
               </div>
               <div className="p-4 bg-purple-50 rounded-lg border border-purple-200">
