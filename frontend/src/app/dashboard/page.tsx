@@ -2,6 +2,8 @@
 
 import PortfolioSummary from '@/components/PortfolioSummary'
 import HoldingsTable from '@/components/HoldingsTable'
+import AddHoldingForm from '@/components/AddHoldingForm'
+import PortfolioChart from '@/components/PortfolioChart'
 
 export default function DashboardPage() {
   return (
@@ -18,24 +20,17 @@ export default function DashboardPage() {
           
           {/* Holdings Table */}
           <div className="lg:col-span-2">
-            <div className="bg-white rounded-lg shadow p-6">
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">Holdings Table</h2>
-              <HoldingsTable />
-            </div>
+            <HoldingsTable />
           </div>
           
+          {/* Add Holding Form */}
           <div className="lg:col-span-1">
-            <div className="bg-white rounded-lg shadow p-6 h-96">
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">Add Holding Form</h2>
-              <p className="text-gray-500">Component will be implemented by Developer C</p>
-            </div>
+            <AddHoldingForm />
           </div>
           
+          {/* Portfolio Chart */}
           <div className="lg:col-span-3">
-            <div className="bg-white rounded-lg shadow p-6 h-96">
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">Portfolio Chart</h2>
-              <p className="text-gray-500">Component will be implemented by Developer C</p>
-            </div>
+            <PortfolioChart />
           </div>
         </div>
       </div>
