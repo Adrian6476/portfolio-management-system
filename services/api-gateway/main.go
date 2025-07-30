@@ -118,6 +118,15 @@ func setupRouter(handler *handlers.Handler, logger *zap.Logger) *gin.Engine {
 	// Health check
 	router.GET("/health", handler.HealthCheck)
 
+	// Development endpoint to create sample data
+	router.POST("/dev/sample-data", func(c *gin.Context) {
+		if err := handler.CreateSampleData(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create sample data"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "Sample data created successfully"})
+	})
+
 	// API routes
 	v1 := router.Group("/api/v1")
 	{
@@ -130,6 +139,16 @@ func setupRouter(handler *handlers.Handler, logger *zap.Logger) *gin.Engine {
 			portfolio.POST("/holdings", handler.AddHolding)
 			portfolio.PUT("/holdings/:id", handler.UpdateHolding)
 			portfolio.DELETE("/holdings/:id", handler.RemoveHolding)
+		}
+
+		// Transactions routes
+		transactions := v1.Group("/transactions")
+		{
+			transactions.GET("/", handler.GetTransactions)
+			transactions.POST("/", handler.CreateTransaction)
+			transactions.GET("/:id", handler.GetTransaction)
+			transactions.PUT("/:id", handler.UpdateTransaction)
+			transactions.DELETE("/:id", handler.DeleteTransaction)
 		}
 
 		// Market data routes
