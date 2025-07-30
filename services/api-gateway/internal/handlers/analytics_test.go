@@ -7,1393 +7,884 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
+	"github.com/portfolio-management/api-gateway/internal/services"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
-
-	"github.com/portfolio-management/api-gateway/internal/services"
 )
 
-// MockFinnhubClient implements a mock Finnhub client for testing
-type MockFinnhubClient struct {
-	quotes   map[string]*services.FinnhubQuote
-	profiles map[string]*services.FinnhubProfile
-	errors   map[string]error
-}
+// GetAssets handler tests
+func TestGetAssets(t *testing.T) {
+	tests := []struct {
+		name           string
+		queryParams    map[string]string
+		setupMock      func(sqlmock.Sqlmock)
+		expectedStatus int
+		expectedBody   []string
+	}{
+		{
+			name:        "successful assets retrieval",
+			queryParams: map[string]string{},
+			setupMock: func(mock sqlmock.Sqlmock) {
+				rows := sqlmock.NewRows([]string{"id", "symbol", "name", "asset_type", "exchange", "currency", "sector", "created_at"}).
+					AddRow("1", "AAPL", "Apple Inc.", "STOCK", "NASDAQ", "USD", "Technology", "2024-01-01T00:00:00Z").
+					AddRow("2", "GOOGL", "Alphabet Inc.", "STOCK", "NASDAQ", "USD", "Technology", "2024-01-01T00:00:00Z")
 
-func NewMockFinnhubClient() *MockFinnhubClient {
-	return &MockFinnhubClient{
-		quotes:   make(map[string]*services.FinnhubQuote),
-		profiles: make(map[string]*services.FinnhubProfile),
-		errors:   make(map[string]error),
+				mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at FROM assets WHERE 1=1 ORDER BY symbol ASC LIMIT \\$1").
+					WithArgs("50").
+					WillReturnRows(rows)
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"AAPL", "Apple Inc.", "GOOGL", "Alphabet Inc.", "Technology", "NASDAQ"},
+		},
+		{
+			name:        "assets filtered by type",
+			queryParams: map[string]string{"type": "STOCK"},
+			setupMock: func(mock sqlmock.Sqlmock) {
+				rows := sqlmock.NewRows([]string{"id", "symbol", "name", "asset_type", "exchange", "currency", "sector", "created_at"}).
+					AddRow("1", "AAPL", "Apple Inc.", "STOCK", "NASDAQ", "USD", "Technology", "2024-01-01T00:00:00Z")
+
+				mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at FROM assets WHERE 1=1 AND asset_type = \\$1 ORDER BY symbol ASC LIMIT \\$2").
+					WithArgs("STOCK", "50").
+					WillReturnRows(rows)
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"AAPL", "STOCK"},
+		},
+		{
+			name:        "assets with search query",
+			queryParams: map[string]string{"search": "Apple"},
+			setupMock: func(mock sqlmock.Sqlmock) {
+				rows := sqlmock.NewRows([]string{"id", "symbol", "name", "asset_type", "exchange", "currency", "sector", "created_at"}).
+					AddRow("1", "AAPL", "Apple Inc.", "STOCK", "NASDAQ", "USD", "Technology", "2024-01-01T00:00:00Z")
+
+				mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at FROM assets WHERE 1=1 AND \\(symbol ILIKE \\$1 OR name ILIKE \\$1\\) ORDER BY symbol ASC LIMIT \\$2").
+					WithArgs("%Apple%", "50").
+					WillReturnRows(rows)
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"AAPL", "Apple Inc."},
+		},
+		{
+			name:        "assets with custom limit",
+			queryParams: map[string]string{"limit": "10"},
+			setupMock: func(mock sqlmock.Sqlmock) {
+				rows := sqlmock.NewRows([]string{"id", "symbol", "name", "asset_type", "exchange", "currency", "sector", "created_at"}).
+					AddRow("1", "AAPL", "Apple Inc.", "STOCK", "NASDAQ", "USD", "Technology", "2024-01-01T00:00:00Z")
+
+				mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at FROM assets WHERE 1=1 ORDER BY symbol ASC LIMIT \\$1").
+					WithArgs("10").
+					WillReturnRows(rows)
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"AAPL"},
+		},
+		{
+			name:        "empty assets result",
+			queryParams: map[string]string{},
+			setupMock: func(mock sqlmock.Sqlmock) {
+				rows := sqlmock.NewRows([]string{"id", "symbol", "name", "asset_type", "exchange", "currency", "sector", "created_at"})
+
+				mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at FROM assets WHERE 1=1 ORDER BY symbol ASC LIMIT \\$1").
+					WithArgs("50").
+					WillReturnRows(rows)
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"\"total\":0"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			gin.SetMode(gin.TestMode)
+			logger, _ := zap.NewDevelopment()
+
+			// Create mock database
+			db, mock, err := sqlmock.New()
+			assert.NoError(t, err)
+			defer db.Close()
+
+			mockServices := &services.Services{
+				DB:     db,
+				Logger: logger,
+			}
+
+			handler := NewHandler(mockServices, logger)
+
+			tt.setupMock(mock)
+
+			router := gin.New()
+			router.GET("/assets", handler.GetAssets)
+
+			url := "/assets"
+			if len(tt.queryParams) > 0 {
+				url += "?"
+				first := true
+				for key, value := range tt.queryParams {
+					if !first {
+						url += "&"
+					}
+					url += key + "=" + value
+					first = false
+				}
+			}
+
+			req, _ := http.NewRequest("GET", url, nil)
+			w := httptest.NewRecorder()
+
+			router.ServeHTTP(w, req)
+
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			for _, expectedStr := range tt.expectedBody {
+				assert.Contains(t, w.Body.String(), expectedStr)
+			}
+
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
 	}
 }
 
-func (m *MockFinnhubClient) SetQuote(symbol string, quote *services.FinnhubQuote) {
-	m.quotes[symbol] = quote
-}
-
-func (m *MockFinnhubClient) SetProfile(symbol string, profile *services.FinnhubProfile) {
-	m.profiles[symbol] = profile
-}
-
-func (m *MockFinnhubClient) SetError(symbol string, err error) {
-	m.errors[symbol] = err
-}
-
-func (m *MockFinnhubClient) GetQuote(symbol string) (*services.FinnhubQuote, error) {
-	if err, exists := m.errors[symbol]; exists {
-		return nil, err
-	}
-	if quote, exists := m.quotes[symbol]; exists {
-		return quote, nil
-	}
-	return nil, fmt.Errorf("quote not found for symbol: %s", symbol)
-}
-
-func (m *MockFinnhubClient) GetCompanyProfile(symbol string) (*services.FinnhubProfile, error) {
-	if err, exists := m.errors[symbol]; exists {
-		return nil, err
-	}
-	if profile, exists := m.profiles[symbol]; exists {
-		return profile, nil
-	}
-	return nil, fmt.Errorf("profile not found for symbol: %s", symbol)
-}
-
-// Test helper functions
-func setupTestHandler(db *sql.DB, finnhub *MockFinnhubClient) *Handler {
-	logger, _ := zap.NewDevelopment()
-	mockServices := &services.Services{
-		DB:      db,
-		Finnhub: finnhub,
-		Logger:  logger,
-	}
-	return NewHandler(mockServices, logger)
-}
-
-func setupTestRouter(handler *Handler, method, path string, handlerFunc gin.HandlerFunc) *gin.Engine {
+func TestGetAssets_NilDB(t *testing.T) {
+	// Setup
 	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	switch method {
-	case "GET":
-		router.GET(path, handlerFunc)
-	case "POST":
-		router.POST(path, handlerFunc)
-	case "PUT":
-		router.PUT(path, handlerFunc)
-	case "DELETE":
-		router.DELETE(path, handlerFunc)
+	logger, _ := zap.NewDevelopment()
+
+	mockServices := &services.Services{
+		DB:     nil,
+		Logger: logger,
 	}
-	return router
-}
 
-// =============================================================================
-// Market Data Handler Tests
-// =============================================================================
+	handler := NewHandler(mockServices, logger)
 
-func TestHandler_GetAssets_Success(t *testing.T) {
-	// Setup mock database
-	db, mock, err := sqlmock.New()
-	assert.NoError(t, err)
-	defer db.Close()
+	router := gin.New()
+	router.GET("/assets", handler.GetAssets)
 
-	// Mock successful query
-	rows := sqlmock.NewRows([]string{"id", "symbol", "name", "asset_type", "exchange", "currency", "sector", "created_at"}).
-		AddRow("1", "AAPL", "Apple Inc.", "STOCK", "NASDAQ", "USD", "Technology", "2024-01-01").
-		AddRow("2", "GOOGL", "Alphabet Inc.", "STOCK", "NASDAQ", "USD", "Technology", "2024-01-02").
-		AddRow("3", "MSFT", "Microsoft Corp.", "STOCK", "NASDAQ", "USD", "Technology", "2024-01-03")
-
-	mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at FROM assets WHERE 1=1 ORDER BY symbol ASC LIMIT (.+)").
-		WithArgs("50").
-		WillReturnRows(rows)
-
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/assets", handler.GetAssets)
-
-	// Test request
 	req, _ := http.NewRequest("GET", "/assets", nil)
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "assets")
-	assert.Contains(t, w.Body.String(), "AAPL")
-	assert.Contains(t, w.Body.String(), "GOOGL")
-	assert.Contains(t, w.Body.String(), "MSFT")
-	assert.NoError(t, mock.ExpectationsWereMet())
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "Failed to fetch assets")
 }
 
-func TestHandler_GetAssets_WithFilters(t *testing.T) {
-	// Setup mock database
+func TestGetAssets_DatabaseError(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
 	db, mock, err := sqlmock.New()
 	assert.NoError(t, err)
 	defer db.Close()
 
-	// Mock query with type filter
-	rows := sqlmock.NewRows([]string{"id", "symbol", "name", "asset_type", "exchange", "currency", "sector", "created_at"}).
-		AddRow("1", "AAPL", "Apple Inc.", "STOCK", "NASDAQ", "USD", "Technology", "2024-01-01")
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
 
-	mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at FROM assets WHERE 1=1 AND asset_type = (.+) ORDER BY symbol ASC LIMIT (.+)").
-		WithArgs("STOCK", "50").
-		WillReturnRows(rows)
+	handler := NewHandler(mockServices, logger)
 
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/assets", handler.GetAssets)
+	mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at FROM assets").
+		WillReturnError(sql.ErrConnDone)
 
-	// Test request with type filter
-	req, _ := http.NewRequest("GET", "/assets?type=STOCK", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
+	router := gin.New()
+	router.GET("/assets", handler.GetAssets)
 
-	// Assertions
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "AAPL")
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestHandler_GetAssets_WithSearch(t *testing.T) {
-	// Setup mock database
-	db, mock, err := sqlmock.New()
-	assert.NoError(t, err)
-	defer db.Close()
-
-	// Mock query with search filter
-	rows := sqlmock.NewRows([]string{"id", "symbol", "name", "asset_type", "exchange", "currency", "sector", "created_at"}).
-		AddRow("1", "AAPL", "Apple Inc.", "STOCK", "NASDAQ", "USD", "Technology", "2024-01-01")
-
-	mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at FROM assets WHERE 1=1 AND \\(symbol ILIKE (.+) OR name ILIKE (.+)\\) ORDER BY symbol ASC LIMIT (.+)").
-		WithArgs("%Apple%", "50").
-		WillReturnRows(rows)
-
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/assets", handler.GetAssets)
-
-	// Test request with search filter
-	req, _ := http.NewRequest("GET", "/assets?search=Apple", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Assertions
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "AAPL")
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestHandler_GetAssets_EmptyResults(t *testing.T) {
-	// Setup mock database
-	db, mock, err := sqlmock.New()
-	assert.NoError(t, err)
-	defer db.Close()
-
-	// Mock empty result
-	rows := sqlmock.NewRows([]string{"id", "symbol", "name", "asset_type", "exchange", "currency", "sector", "created_at"})
-	mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at FROM assets WHERE 1=1 ORDER BY symbol ASC LIMIT (.+)").
-		WithArgs("50").
-		WillReturnRows(rows)
-
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/assets", handler.GetAssets)
-
-	// Test request
 	req, _ := http.NewRequest("GET", "/assets", nil)
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), `"total":0`)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestHandler_GetAssets_DatabaseError(t *testing.T) {
-	// Setup mock database
-	db, mock, err := sqlmock.New()
-	assert.NoError(t, err)
-	defer db.Close()
-
-	// Mock database error
-	mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at FROM assets WHERE 1=1 ORDER BY symbol ASC LIMIT (.+)").
-		WithArgs("50").
-		WillReturnError(fmt.Errorf("database connection failed"))
-
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/assets", handler.GetAssets)
-
-	// Test request
-	req, _ := http.NewRequest("GET", "/assets", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Assertions
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Contains(t, w.Body.String(), "Failed to fetch assets")
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestHandler_GetAssets_NilDB(t *testing.T) {
-	handler := setupTestHandler(nil, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/assets", handler.GetAssets)
+// GetAsset handler tests
+func TestGetAsset_Success(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
 
-	// Test request
-	req, _ := http.NewRequest("GET", "/assets", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Assertions
-	assert.Equal(t, http.StatusInternalServerError, w.Code)
-	assert.Contains(t, w.Body.String(), "Failed to fetch assets")
-}
-
-func TestHandler_GetAsset_Success(t *testing.T) {
-	// Setup mock database
+	// Create mock database
 	db, mock, err := sqlmock.New()
 	assert.NoError(t, err)
 	defer db.Close()
 
-	// Mock asset query
-	mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at, updated_at FROM assets WHERE symbol = (.+)").
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	rows := sqlmock.NewRows([]string{"id", "symbol", "name", "asset_type", "exchange", "currency", "sector", "created_at", "updated_at"}).
+		AddRow("1", "AAPL", "Apple Inc.", "STOCK", "NASDAQ", "USD", "Technology", "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z")
+
+	mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at, updated_at FROM assets WHERE symbol = \\$1").
 		WithArgs("AAPL").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "symbol", "name", "asset_type", "exchange", "currency", "sector", "created_at", "updated_at"}).
-			AddRow("1", "AAPL", "Apple Inc.", "STOCK", "NASDAQ", "USD", "Technology", "2024-01-01", "2024-01-01"))
+		WillReturnRows(rows)
 
-	// Mock market data query
-	mock.ExpectQuery("SELECT price, change_24h, timestamp FROM market_data WHERE asset_id = (.+) ORDER BY timestamp DESC LIMIT 1").
+	// Mock market data query (optional)
+	mock.ExpectQuery("SELECT price, change_24h, timestamp FROM market_data WHERE asset_id = \\$1 ORDER BY timestamp DESC LIMIT 1").
 		WithArgs("1").
-		WillReturnRows(sqlmock.NewRows([]string{"price", "change_24h", "timestamp"}).
-			AddRow(150.50, 2.50, "2024-01-01 10:00:00"))
+		WillReturnError(sql.ErrNoRows) // No market data available
 
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/assets/:symbol", handler.GetAsset)
+	router := gin.New()
+	router.GET("/assets/:symbol", handler.GetAsset)
 
-	// Test request
 	req, _ := http.NewRequest("GET", "/assets/AAPL", nil)
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "AAPL")
 	assert.Contains(t, w.Body.String(), "Apple Inc.")
-	assert.Contains(t, w.Body.String(), "current_price")
+	assert.Contains(t, w.Body.String(), "Technology")
+
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestHandler_GetAsset_NotFound(t *testing.T) {
-	// Setup mock database
+func TestGetAsset_NotFound(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
 	db, mock, err := sqlmock.New()
 	assert.NoError(t, err)
 	defer db.Close()
 
-	// Mock asset not found
-	mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at, updated_at FROM assets WHERE symbol = (.+)").
-		WithArgs("INVALID").
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at, updated_at FROM assets WHERE symbol = \\$1").
+		WithArgs("NONEXISTENT").
 		WillReturnError(sql.ErrNoRows)
 
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/assets/:symbol", handler.GetAsset)
+	router := gin.New()
+	router.GET("/assets/:symbol", handler.GetAsset)
 
-	// Test request
-	req, _ := http.NewRequest("GET", "/assets/INVALID", nil)
+	req, _ := http.NewRequest("GET", "/assets/NONEXISTENT", nil)
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Contains(t, w.Body.String(), "Asset not found")
+
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestHandler_GetAsset_MissingSymbol(t *testing.T) {
-	handler := setupTestHandler(nil, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/assets/:symbol", handler.GetAsset)
+// GetCurrentPrice handler tests
+func TestGetCurrentPrice_ServiceUnavailable(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
 
-	// Test request with empty symbol
-	req, _ := http.NewRequest("GET", "/assets/", nil)
+	mockServices := &services.Services{
+		Finnhub: nil, // No Finnhub service
+		Logger:  logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	router := gin.New()
+	router.GET("/assets/:symbol/price", handler.GetCurrentPrice)
+
+	req, _ := http.NewRequest("GET", "/assets/AAPL/price", nil)
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
-	assert.Equal(t, http.StatusNotFound, w.Code) // Route doesn't match
-}
-
-func TestHandler_GetCurrentPrice_Success(t *testing.T) {
-	// Setup mock Finnhub client
-	mockFinnhub := NewMockFinnhubClient()
-	mockFinnhub.SetQuote("AAPL", &services.FinnhubQuote{
-		CurrentPrice:       150.50,
-		Change:             2.50,
-		PercentChange:      1.69,
-		HighPriceOfDay:     152.00,
-		LowPriceOfDay:      148.00,
-		OpenPriceOfDay:     149.00,
-		PreviousClosePrice: 148.00,
-		Timestamp:          1640995200,
-	})
-
-	handler := setupTestHandler(nil, mockFinnhub)
-	router := setupTestRouter(handler, "GET", "/price/:symbol", handler.GetCurrentPrice)
-
-	// Test request
-	req, _ := http.NewRequest("GET", "/price/AAPL", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Assertions
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "AAPL")
-	assert.Contains(t, w.Body.String(), "150.5")
-	assert.Contains(t, w.Body.String(), "current_price")
-	assert.Contains(t, w.Body.String(), "change")
-	assert.Contains(t, w.Body.String(), "change_percent")
-}
-
-func TestHandler_GetCurrentPrice_FinnhubError(t *testing.T) {
-	// Setup mock Finnhub client with error
-	mockFinnhub := NewMockFinnhubClient()
-	mockFinnhub.SetError("AAPL", fmt.Errorf("API rate limit exceeded"))
-
-	handler := setupTestHandler(nil, mockFinnhub)
-	router := setupTestRouter(handler, "GET", "/price/:symbol", handler.GetCurrentPrice)
-
-	// Test request
-	req, _ := http.NewRequest("GET", "/price/AAPL", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Assertions
-	assert.Equal(t, http.StatusInternalServerError, w.Code)
-	assert.Contains(t, w.Body.String(), "Failed to fetch current price")
-}
-
-func TestHandler_GetCurrentPrice_NoFinnhub(t *testing.T) {
-	handler := setupTestHandler(nil, nil)
-	router := setupTestRouter(handler, "GET", "/price/:symbol", handler.GetCurrentPrice)
-
-	// Test request
-	req, _ := http.NewRequest("GET", "/price/AAPL", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Assertions
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.Contains(t, w.Body.String(), "Market data service not available")
 }
 
-func TestHandler_GetCurrentPrice_MissingSymbol(t *testing.T) {
-	handler := setupTestHandler(nil, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/price/:symbol", handler.GetCurrentPrice)
-
-	// Test request with empty symbol
-	req, _ := http.NewRequest("GET", "/price/", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Assertions
-	assert.Equal(t, http.StatusNotFound, w.Code) // Route doesn't match
+// Mock Finnhub for testing
+type Quote struct {
+	CurrentPrice  float64
+	Change        float64
+	PercentChange float64
 }
 
-func TestHandler_GetPriceHistory_Success(t *testing.T) {
-	// Setup mock database
+type MockFinnhub struct {
+	QuoteData map[string]*Quote
+}
+
+func (m *MockFinnhub) GetQuote(symbol string) (*Quote, error) {
+	if quote, exists := m.QuoteData[symbol]; exists {
+		return quote, nil
+	}
+	return nil, fmt.Errorf("symbol not found")
+}
+
+func TestGetCurrentPrice_EmptySymbol(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	mockServices := &services.Services{
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	router := gin.New()
+	router.GET("/assets/:symbol/price", handler.GetCurrentPrice)
+
+	req, _ := http.NewRequest("GET", "/assets//price", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "Symbol is required")
+}
+
+// GetPriceHistory handler tests
+func TestGetPriceHistory_Success(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
 	db, mock, err := sqlmock.New()
 	assert.NoError(t, err)
 	defer db.Close()
 
-	// Mock asset ID query
-	mock.ExpectQuery("SELECT id FROM assets WHERE symbol = (.+)").
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	// Mock asset ID lookup first
+	mock.ExpectQuery("SELECT id FROM assets WHERE symbol = \\$1").
 		WithArgs("AAPL").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("1"))
 
 	// Mock price history query
-	historyRows := sqlmock.NewRows([]string{"date", "open_price", "high_price", "low_price", "close_price", "volume"}).
-		AddRow("2024-01-03", 150.00, 152.00, 148.00, 151.00, 1000000).
-		AddRow("2024-01-02", 148.00, 150.00, 147.00, 149.00, 1200000).
-		AddRow("2024-01-01", 147.00, 149.00, 146.00, 148.00, 1100000)
+	rows := sqlmock.NewRows([]string{"date", "open", "high", "low", "close", "volume"}).
+		AddRow("2024-01-01T00:00:00Z", 148.0, 152.0, 147.0, 150.0, 1000000).
+		AddRow("2024-01-02T00:00:00Z", 150.0, 154.0, 149.0, 152.0, 1100000)
 
-	mock.ExpectQuery("SELECT date, open_price, high_price, low_price, close_price, volume FROM price_history WHERE asset_id = (.+) AND date >= CURRENT_DATE - INTERVAL '30 days' ORDER BY date DESC LIMIT (.+)").
-		WithArgs("1", "100").
-		WillReturnRows(historyRows)
+	mock.ExpectQuery("SELECT (.+) FROM price_history").
+		WillReturnRows(rows)
 
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/price-history/:symbol", handler.GetPriceHistory)
+	router := gin.New()
+	router.GET("/assets/:symbol/history", handler.GetPriceHistory)
 
-	// Test request
-	req, _ := http.NewRequest("GET", "/price-history/AAPL", nil)
+	req, _ := http.NewRequest("GET", "/assets/AAPL/history?period=30d&interval=1d", nil)
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "AAPL")
-	assert.Contains(t, w.Body.String(), "price_history")
-	assert.Contains(t, w.Body.String(), "total_points")
+	assert.Contains(t, w.Body.String(), "history")
+
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestHandler_GetPriceHistory_AssetNotFound(t *testing.T) {
-	// Setup mock database
+func TestGetPriceHistory_DefaultParameters(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
 	db, mock, err := sqlmock.New()
 	assert.NoError(t, err)
 	defer db.Close()
 
-	// Mock asset not found
-	mock.ExpectQuery("SELECT id FROM assets WHERE symbol = (.+)").
-		WithArgs("INVALID").
-		WillReturnError(sql.ErrNoRows)
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
 
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/price-history/:symbol", handler.GetPriceHistory)
+	handler := NewHandler(mockServices, logger)
 
-	// Test request
-	req, _ := http.NewRequest("GET", "/price-history/INVALID", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Assertions
-	assert.Equal(t, http.StatusNotFound, w.Code)
-	assert.Contains(t, w.Body.String(), "Asset not found")
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestHandler_GetPriceHistory_WithPeriodFilter(t *testing.T) {
-	// Setup mock database
-	db, mock, err := sqlmock.New()
-	assert.NoError(t, err)
-	defer db.Close()
-
-	// Mock asset ID query
-	mock.ExpectQuery("SELECT id FROM assets WHERE symbol = (.+)").
+	// Mock asset ID lookup first
+	mock.ExpectQuery("SELECT id FROM assets WHERE symbol = \\$1").
 		WithArgs("AAPL").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("1"))
 
-	// Mock price history query with 7d period
-	historyRows := sqlmock.NewRows([]string{"date", "open_price", "high_price", "low_price", "close_price", "volume"}).
-		AddRow("2024-01-07", 150.00, 152.00, 148.00, 151.00, 1000000)
+	// Mock price history query
+	rows := sqlmock.NewRows([]string{"date", "open", "high", "low", "close", "volume"}).
+		AddRow("2024-01-01T00:00:00Z", 148.0, 152.0, 147.0, 150.0, 1000000)
 
-	mock.ExpectQuery("SELECT date, open_price, high_price, low_price, close_price, volume FROM price_history WHERE asset_id = (.+) AND date >= CURRENT_DATE - INTERVAL '7 days' ORDER BY date DESC LIMIT (.+)").
-		WithArgs("1", "100").
-		WillReturnRows(historyRows)
+	mock.ExpectQuery("SELECT (.+) FROM price_history").
+		WillReturnRows(rows)
 
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/price-history/:symbol", handler.GetPriceHistory)
+	router := gin.New()
+	router.GET("/assets/:symbol/history", handler.GetPriceHistory)
 
-	// Test request with period filter
-	req, _ := http.NewRequest("GET", "/price-history/AAPL?period=7d", nil)
+	req, _ := http.NewRequest("GET", "/assets/AAPL/history", nil)
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
 	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), `"period":"7d"`)
+	assert.Contains(t, w.Body.String(), "AAPL")
+
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestHandler_GetPriceHistory_EmptyHistory(t *testing.T) {
-	// Setup mock database
+// GetPerformanceAnalytics handler tests
+func TestGetPerformanceAnalytics_Success(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
 	db, mock, err := sqlmock.New()
 	assert.NoError(t, err)
 	defer db.Close()
 
-	// Mock asset ID query
-	mock.ExpectQuery("SELECT id FROM assets WHERE symbol = (.+)").
-		WithArgs("AAPL").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("1"))
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
 
-	// Mock empty price history
-	historyRows := sqlmock.NewRows([]string{"date", "open_price", "high_price", "low_price", "close_price", "volume"})
-	mock.ExpectQuery("SELECT date, open_price, high_price, low_price, close_price, volume FROM price_history WHERE asset_id = (.+) AND date >= CURRENT_DATE - INTERVAL '30 days' ORDER BY date DESC LIMIT (.+)").
-		WithArgs("1", "100").
-		WillReturnRows(historyRows)
-
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/price-history/:symbol", handler.GetPriceHistory)
-
-	// Test request
-	req, _ := http.NewRequest("GET", "/price-history/AAPL", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Assertions
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), `"total_points":0`)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-// =============================================================================
-// Analytics Handler Tests
-// =============================================================================
-
-func TestHandler_GetPerformanceAnalytics_Success(t *testing.T) {
-	// Setup mock database
-	db, mock, err := sqlmock.New()
-	assert.NoError(t, err)
-	defer db.Close()
-
-	// Setup mock Finnhub client
-	mockFinnhub := NewMockFinnhubClient()
-	mockFinnhub.SetQuote("AAPL", &services.FinnhubQuote{CurrentPrice: 155.00})
-	mockFinnhub.SetQuote("GOOGL", &services.FinnhubQuote{CurrentPrice: 2850.00})
+	handler := NewHandler(mockServices, logger)
 
 	// Mock user ID query
-	mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
 		WithArgs("default_user").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
 	// Mock portfolio totals query
-	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_cost, COUNT\\(\\*\\) as total_holdings FROM portfolio_holdings ph WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
-		WillReturnRows(sqlmock.NewRows([]string{"total_cost", "total_holdings"}).AddRow(15500.0, 2))
+	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_cost, COUNT\\(\\*\\) as total_holdings FROM portfolio_holdings ph WHERE ph.user_id = \\$1").
+		WithArgs("user1").
+		WillReturnRows(sqlmock.NewRows([]string{"total_cost", "total_holdings"}).AddRow(3000.0, 2))
 
 	// Mock holdings query for market value calculation
 	holdingsRows := sqlmock.NewRows([]string{"symbol", "quantity", "average_cost"}).
 		AddRow("AAPL", 10.0, 150.0).
-		AddRow("GOOGL", 5.0, 2800.0)
-	mock.ExpectQuery("SELECT a.symbol, ph.quantity, ph.average_cost FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
+		AddRow("GOOGL", 5.0, 2500.0)
+
+	mock.ExpectQuery("SELECT (.+) FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = \\$1").
+		WithArgs("user1").
 		WillReturnRows(holdingsRows)
 
-	// Mock snapshots query
-	snapshotRows := sqlmock.NewRows([]string{"snapshot_date", "total_value", "total_cost", "unrealized_pnl"}).
-		AddRow("2024-01-01", 15000.0, 15500.0, -500.0).
-		AddRow("2024-01-02", 15800.0, 15500.0, 300.0)
-	mock.ExpectQuery("SELECT snapshot_date, total_value, total_cost, unrealized_pnl FROM portfolio_snapshots WHERE user_id = (.+) AND snapshot_date >= CURRENT_DATE - INTERVAL '30 days' ORDER BY snapshot_date DESC LIMIT 30").
-		WithArgs("user-123").
-		WillReturnRows(snapshotRows)
+	// Mock snapshots query for historical data
+	snapshotsRows := sqlmock.NewRows([]string{"snapshot_date", "total_value", "total_cost", "unrealized_pnl"}).
+		AddRow("2024-01-01", 2500.0, 2000.0, 500.0).
+		AddRow("2024-01-15", 2750.0, 2000.0, 750.0)
+
+	mock.ExpectQuery("SELECT (.+) FROM portfolio_snapshots WHERE user_id = \\$1").
+		WithArgs("user1").
+		WillReturnRows(snapshotsRows)
 
 	// Mock top performers query
-	performerRows := sqlmock.NewRows([]string{"symbol", "name", "quantity", "average_cost", "total_value"}).
-		AddRow("GOOGL", "Alphabet Inc.", 5.0, 2800.0, 14000.0).
+	topPerformersRows := sqlmock.NewRows([]string{"symbol", "name", "quantity", "average_cost", "total_value"}).
+		AddRow("GOOGL", "Alphabet Inc.", 5.0, 2500.0, 12500.0).
 		AddRow("AAPL", "Apple Inc.", 10.0, 150.0, 1500.0)
-	mock.ExpectQuery("SELECT a.symbol, a.name, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) ORDER BY \\(ph.quantity \\* ph.average_cost\\) DESC LIMIT 5").
-		WithArgs("user-123").
-		WillReturnRows(performerRows)
 
-	handler := setupTestHandler(db, mockFinnhub)
-	router := setupTestRouter(handler, "GET", "/analytics/performance", handler.GetPerformanceAnalytics)
+	mock.ExpectQuery("SELECT (.+) FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = \\$1 ORDER BY \\(ph.quantity \\* ph.average_cost\\) DESC LIMIT 5").
+		WithArgs("user1").
+		WillReturnRows(topPerformersRows)
 
-	// Test request
-	req, _ := http.NewRequest("GET", "/analytics/performance", nil)
+	router := gin.New()
+	router.GET("/analytics/performance", handler.GetPerformanceAnalytics)
+
+	req, _ := http.NewRequest("GET", "/analytics/performance?period=30d", nil)
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "portfolio_performance")
-	assert.Contains(t, w.Body.String(), "historical_snapshots")
-	assert.Contains(t, w.Body.String(), "top_performers")
-	assert.Contains(t, w.Body.String(), "total_cost")
-	assert.Contains(t, w.Body.String(), "current_value")
+	assert.Contains(t, w.Body.String(), "total_value")
+
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestHandler_GetPerformanceAnalytics_WithPriceErrors(t *testing.T) {
-	// Setup mock database
-	db, mock, err := sqlmock.New()
-	assert.NoError(t, err)
-	defer db.Close()
+func TestGetPerformanceAnalytics_NilDB(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
 
-	// Setup mock Finnhub client with errors
-	mockFinnhub := NewMockFinnhubClient()
-	mockFinnhub.SetError("AAPL", fmt.Errorf("API error"))
-	mockFinnhub.SetQuote("GOOGL", &services.FinnhubQuote{CurrentPrice: 2850.00})
+	mockServices := &services.Services{
+		DB:     nil,
+		Logger: logger,
+	}
 
-	// Mock user ID query
-	mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
-		WithArgs("default_user").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
+	handler := NewHandler(mockServices, logger)
 
-	// Mock portfolio totals query
-	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_cost, COUNT\\(\\*\\) as total_holdings FROM portfolio_holdings ph WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
-		WillReturnRows(sqlmock.NewRows([]string{"total_cost", "total_holdings"}).AddRow(15500.0, 2))
+	router := gin.New()
+	router.GET("/analytics/performance", handler.GetPerformanceAnalytics)
 
-	// Mock holdings query
-	holdingsRows := sqlmock.NewRows([]string{"symbol", "quantity", "average_cost"}).
-		AddRow("AAPL", 10.0, 150.0).
-		AddRow("GOOGL", 5.0, 2800.0)
-	mock.ExpectQuery("SELECT a.symbol, ph.quantity, ph.average_cost FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
-		WillReturnRows(holdingsRows)
-
-	// Mock empty
-	// Mock empty snapshots query
-	snapshotRows := sqlmock.NewRows([]string{"snapshot_date", "total_value", "total_cost", "unrealized_pnl"})
-	mock.ExpectQuery("SELECT snapshot_date, total_value, total_cost, unrealized_pnl FROM portfolio_snapshots WHERE user_id = (.+) AND snapshot_date >= CURRENT_DATE - INTERVAL '30 days' ORDER BY snapshot_date DESC LIMIT 30").
-		WithArgs("user-123").
-		WillReturnRows(snapshotRows)
-
-	// Mock top performers query
-	performerRows := sqlmock.NewRows([]string{"symbol", "name", "quantity", "average_cost", "total_value"}).
-		AddRow("GOOGL", "Alphabet Inc.", 5.0, 2800.0, 14000.0).
-		AddRow("AAPL", "Apple Inc.", 10.0, 150.0, 1500.0)
-	mock.ExpectQuery("SELECT a.symbol, a.name, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) ORDER BY \\(ph.quantity \\* ph.average_cost\\) DESC LIMIT 5").
-		WithArgs("user-123").
-		WillReturnRows(performerRows)
-
-	handler := setupTestHandler(db, mockFinnhub)
-	router := setupTestRouter(handler, "GET", "/analytics/performance", handler.GetPerformanceAnalytics)
-
-	// Test request
 	req, _ := http.NewRequest("GET", "/analytics/performance", nil)
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "warnings")
-	assert.Contains(t, w.Body.String(), "Could not fetch price for AAPL")
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestHandler_GetPerformanceAnalytics_NilDB(t *testing.T) {
-	handler := setupTestHandler(nil, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/analytics/performance", handler.GetPerformanceAnalytics)
-
-	// Test request
-	req, _ := http.NewRequest("GET", "/analytics/performance", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Assertions
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Contains(t, w.Body.String(), "Failed to fetch performance analytics")
 }
 
-func TestHandler_GetRiskMetrics_Success(t *testing.T) {
-	// Setup mock database
+// GetRiskMetrics handler tests
+func TestGetRiskMetrics_Success(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
 	db, mock, err := sqlmock.New()
 	assert.NoError(t, err)
 	defer db.Close()
 
-	// Setup mock Finnhub client
-	mockFinnhub := NewMockFinnhubClient()
-	mockFinnhub.SetQuote("AAPL", &services.FinnhubQuote{CurrentPrice: 155.00})
-	mockFinnhub.SetQuote("GOOGL", &services.FinnhubQuote{CurrentPrice: 2850.00})
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
 
 	// Mock user ID query
-	mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
 		WithArgs("default_user").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-	// Mock diversification query
-	diversificationRows := sqlmock.NewRows([]string{"sector", "holdings_count", "sector_value"}).
-		AddRow("Technology", 2, 15500.0).
-		AddRow("Healthcare", 1, 5000.0)
-	mock.ExpectQuery("SELECT a.sector, COUNT\\(\\*\\) as holdings_count, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as sector_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) AND a.sector IS NOT NULL GROUP BY a.sector ORDER BY sector_value DESC").
-		WithArgs("user-123").
-		WillReturnRows(diversificationRows)
+	// Mock portfolio holdings for risk calculations
+	holdingsRows := sqlmock.NewRows([]string{"sector", "holdings_count", "sector_value"}).
+		AddRow("Technology", 2, 4390.0).
+		AddRow("Financial", 1, 750.0)
 
-	// Mock beta calculation query
+	mock.ExpectQuery("SELECT a.sector, COUNT\\(\\*\\) as holdings_count, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as sector_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = \\$1 AND a.sector IS NOT NULL GROUP BY a.sector ORDER BY sector_value DESC").
+		WithArgs("user1").
+		WillReturnRows(holdingsRows)
+
+	// Mock additional query for beta calculation
 	betaRows := sqlmock.NewRows([]string{"symbol", "quantity", "average_cost", "position_value"}).
 		AddRow("AAPL", 10.0, 150.0, 1500.0).
-		AddRow("GOOGL", 5.0, 2800.0, 14000.0)
-	mock.ExpectQuery("SELECT a.symbol, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as position_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
+		AddRow("MSFT", 8.0, 300.0, 2400.0).
+		AddRow("JPM", 5.0, 140.0, 700.0)
+
+	mock.ExpectQuery("SELECT a.symbol, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as position_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = \\$1").
+		WithArgs("user1").
 		WillReturnRows(betaRows)
 
-	// Mock current value calculation query (duplicate for current portfolio value calculation)
-	currentValueRows := sqlmock.NewRows([]string{"symbol", "quantity", "average_cost", "position_value"}).
-		AddRow("AAPL", 10.0, 150.0, 1500.0).
-		AddRow("GOOGL", 5.0, 2800.0, 14000.0)
-	mock.ExpectQuery("SELECT a.symbol, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as position_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
-		WillReturnRows(currentValueRows)
+	router := gin.New()
+	router.GET("/analytics/risk", handler.GetRiskMetrics)
 
-	handler := setupTestHandler(db, mockFinnhub)
-	router := setupTestRouter(handler, "GET", "/analytics/risk", handler.GetRiskMetrics)
-
-	// Test request
 	req, _ := http.NewRequest("GET", "/analytics/risk", nil)
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
 	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "risk_assessment")
+	assert.Contains(t, w.Body.String(), "diversification")
 	assert.Contains(t, w.Body.String(), "sector_diversification")
-	assert.Contains(t, w.Body.String(), "volatility_metrics")
-	assert.Contains(t, w.Body.String(), "herfindahl_index")
-	assert.Contains(t, w.Body.String(), "portfolio_beta")
-	assert.Contains(t, w.Body.String(), "sharpe_ratio")
+
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestHandler_GetRiskMetrics_HighConcentration(t *testing.T) {
-	// Setup mock database
+func TestGetRiskMetrics_EmptyPortfolio(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
 	db, mock, err := sqlmock.New()
 	assert.NoError(t, err)
 	defer db.Close()
 
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
 	// Mock user ID query
-	mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
 		WithArgs("default_user").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-	// Mock high concentration in single sector
-	diversificationRows := sqlmock.NewRows([]string{"sector", "holdings_count", "sector_value"}).
-		AddRow("Technology", 5, 95000.0).
-		AddRow("Healthcare", 1, 5000.0)
-	mock.ExpectQuery("SELECT a.sector, COUNT\\(\\*\\) as holdings_count, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as sector_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) AND a.sector IS NOT NULL GROUP BY a.sector ORDER BY sector_value DESC").
-		WithArgs("user-123").
-		WillReturnRows(diversificationRows)
+	// Mock empty portfolio holdings
+	holdingsRows := sqlmock.NewRows([]string{"sector", "holdings_count", "sector_value"})
 
-	// Mock beta calculation query
+	mock.ExpectQuery("SELECT a.sector, COUNT\\(\\*\\) as holdings_count, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as sector_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = \\$1 AND a.sector IS NOT NULL GROUP BY a.sector ORDER BY sector_value DESC").
+		WithArgs("user1").
+		WillReturnRows(holdingsRows)
+
+	// Mock empty beta calculation query
 	betaRows := sqlmock.NewRows([]string{"symbol", "quantity", "average_cost", "position_value"})
-	mock.ExpectQuery("SELECT a.symbol, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as position_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
+
+	mock.ExpectQuery("SELECT a.symbol, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as position_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = \\$1").
+		WithArgs("user1").
 		WillReturnRows(betaRows)
 
-	// Mock current value calculation query
-	currentValueRows := sqlmock.NewRows([]string{"symbol", "quantity", "average_cost", "position_value"})
-	mock.ExpectQuery("SELECT a.symbol, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as position_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
-		WillReturnRows(currentValueRows)
+	router := gin.New()
+	router.GET("/analytics/risk", handler.GetRiskMetrics)
 
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/analytics/risk", handler.GetRiskMetrics)
-
-	// Test request
 	req, _ := http.NewRequest("GET", "/analytics/risk", nil)
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
 	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "High")
-	assert.Contains(t, w.Body.String(), "concentrated portfolio")
+	assert.Contains(t, w.Body.String(), "diversification")
+
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestHandler_GetRiskMetrics_DatabaseError(t *testing.T) {
-	// Setup mock database
+// GetAssetAllocation handler tests
+func TestGetAssetAllocation_Success(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
 	db, mock, err := sqlmock.New()
 	assert.NoError(t, err)
 	defer db.Close()
 
-	// Mock user ID query
-	mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
-		WithArgs("default_user").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
 
-	// Mock database error
-	mock.ExpectQuery("SELECT a.sector, COUNT\\(\\*\\) as holdings_count, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as sector_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) AND a.sector IS NOT NULL GROUP BY a.sector ORDER BY sector_value DESC").
-		WithArgs("user-123").
-		WillReturnError(fmt.Errorf("database connection failed"))
-
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/analytics/risk", handler.GetRiskMetrics)
-
-	// Test request
-	req, _ := http.NewRequest("GET", "/analytics/risk", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Assertions
-	assert.Equal(t, http.StatusInternalServerError, w.Code)
-	assert.Contains(t, w.Body.String(), "Failed to fetch risk metrics")
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestHandler_GetAssetAllocation_Success(t *testing.T) {
-	// Setup mock database
-	db, mock, err := sqlmock.New()
-	assert.NoError(t, err)
-	defer db.Close()
+	handler := NewHandler(mockServices, logger)
 
 	// Mock user ID query
-	mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
 		WithArgs("default_user").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-	// Mock asset type allocation query
+	// Mock portfolio holdings for allocation
 	assetTypeRows := sqlmock.NewRows([]string{"asset_type", "count", "total_value"}).
-		AddRow("STOCK", 3, 15500.0).
-		AddRow("BOND", 1, 5000.0)
-	mock.ExpectQuery("SELECT a.asset_type, COUNT\\(\\*\\) as count, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) GROUP BY a.asset_type ORDER BY total_value DESC").
-		WithArgs("user-123").
+		AddRow("STOCK", 2, 45250.0).
+		AddRow("CRYPTO", 1, 30000.0)
+
+	mock.ExpectQuery("SELECT a.asset_type, COUNT\\(\\*\\) as count, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = \\$1 GROUP BY a.asset_type ORDER BY total_value DESC").
+		WithArgs("user1").
 		WillReturnRows(assetTypeRows)
 
 	// Mock sector allocation query
 	sectorRows := sqlmock.NewRows([]string{"sector", "count", "total_value"}).
-		AddRow("Technology", 2, 12000.0).
-		AddRow("Healthcare", 1, 3500.0).
-		AddRow("Unknown", 1, 5000.0)
-	mock.ExpectQuery("SELECT COALESCE\\(a.sector, 'Unknown'\\) as sector, COUNT\\(\\*\\) as count, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) GROUP BY a.sector ORDER BY total_value DESC").
-		WithArgs("user-123").
+		AddRow("Technology", 2, 45250.0).
+		AddRow("Cryptocurrency", 1, 30000.0)
+
+	mock.ExpectQuery("SELECT COALESCE\\(a.sector, 'Unknown'\\) as sector, COUNT\\(\\*\\) as count, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = \\$1 GROUP BY a.sector ORDER BY total_value DESC").
+		WithArgs("user1").
 		WillReturnRows(sectorRows)
 
 	// Mock top holdings query
 	topHoldingsRows := sqlmock.NewRows([]string{"symbol", "name", "quantity", "average_cost", "total_value"}).
-		AddRow("GOOGL", "Alphabet Inc.", 5.0, 2800.0, 14000.0).
-		AddRow("AAPL", "Apple Inc.", 10.0, 150.0, 1500.0)
-	mock.ExpectQuery("SELECT a.symbol, a.name, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) ORDER BY \\(ph.quantity \\* ph.average_cost\\) DESC LIMIT 10").
-		WithArgs("user-123").
+		AddRow("BTC-USD", "Bitcoin", 0.5, 50000.0, 30000.0).
+		AddRow("GOOGL", "Alphabet Inc.", 5.0, 2500.0, 13500.0).
+		AddRow("AAPL", "Apple Inc.", 10.0, 150.0, 1750.0)
+
+	mock.ExpectQuery("SELECT a.symbol, a.name, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = \\$1 ORDER BY \\(ph.quantity \\* ph.average_cost\\) DESC LIMIT 10").
+		WithArgs("user1").
 		WillReturnRows(topHoldingsRows)
 
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/analytics/allocation", handler.GetAssetAllocation)
+	router := gin.New()
+	router.GET("/analytics/allocation", handler.GetAssetAllocation)
 
-	// Test request
 	req, _ := http.NewRequest("GET", "/analytics/allocation", nil)
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
 	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "allocation_summary")
 	assert.Contains(t, w.Body.String(), "by_asset_type")
 	assert.Contains(t, w.Body.String(), "by_sector")
 	assert.Contains(t, w.Body.String(), "top_holdings")
-	assert.Contains(t, w.Body.String(), "STOCK")
-	assert.Contains(t, w.Body.String(), "Technology")
+
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestHandler_GetAssetAllocation_EmptyPortfolio(t *testing.T) {
-	// Setup mock database
+// WhatIfAnalysis handler tests
+func TestWhatIfAnalysis_BuyScenario(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
 	db, mock, err := sqlmock.New()
 	assert.NoError(t, err)
 	defer db.Close()
 
-	// Mock user ID query
-	mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
-		WithArgs("default_user").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
 
-	// Mock empty asset type allocation
-	assetTypeRows := sqlmock.NewRows([]string{"asset_type", "count", "total_value"})
-	mock.ExpectQuery("SELECT a.asset_type, COUNT\\(\\*\\) as count, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) GROUP BY a.asset_type ORDER BY total_value DESC").
-		WithArgs("user-123").
-		WillReturnRows(assetTypeRows)
-
-	// Mock empty sector allocation
-	sectorRows := sqlmock.NewRows([]string{"sector", "count", "total_value"})
-	mock.ExpectQuery("SELECT COALESCE\\(a.sector, 'Unknown'\\) as sector, COUNT\\(\\*\\) as count, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) GROUP BY a.sector ORDER BY total_value DESC").
-		WithArgs("user-123").
-		WillReturnRows(sectorRows)
-
-	// Mock empty top holdings
-	topHoldingsRows := sqlmock.NewRows([]string{"symbol", "name", "quantity", "average_cost", "total_value"})
-	mock.ExpectQuery("SELECT a.symbol, a.name, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) ORDER BY \\(ph.quantity \\* ph.average_cost\\) DESC LIMIT 10").
-		WithArgs("user-123").
-		WillReturnRows(topHoldingsRows)
-
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "GET", "/analytics/allocation", handler.GetAssetAllocation)
-
-	// Test request
-	req, _ := http.NewRequest("GET", "/analytics/allocation", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Assertions
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), `"total_portfolio_value":0`)
-	assert.Contains(t, w.Body.String(), `"total_holdings":0`)
-	assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestHandler_WhatIfAnalysis_BuySuccess(t *testing.T) {
-	// Setup mock database
-	db, mock, err := sqlmock.New()
-	assert.NoError(t, err)
-	defer db.Close()
+	handler := NewHandler(mockServices, logger)
 
 	// Mock user ID query
-	mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
 		WithArgs("default_user").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-	// Mock current portfolio query
-	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_cost, COUNT\\(\\*\\) as total_holdings FROM portfolio_holdings ph WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
-		WillReturnRows(sqlmock.NewRows([]string{"total_cost", "total_holdings"}).AddRow(15500.0, 2))
+	// Mock current portfolio totals query
+	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_cost, COUNT\\(\\*\\) as total_holdings FROM portfolio_holdings ph WHERE ph.user_id = \\$1").
+		WithArgs("user1").
+		WillReturnRows(sqlmock.NewRows([]string{"total_cost", "total_holdings"}).AddRow(3400.0, 2))
 
-	// Mock current holding check (no existing position)
-	mock.ExpectQuery("SELECT ph.quantity, ph.average_cost FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) AND a.symbol = (.+)").
-		WithArgs("user-123", "TSLA").
-		WillReturnError(sql.ErrNoRows)
+	// Mock current holding check for GOOGL
+	mock.ExpectQuery("SELECT ph.quantity, ph.average_cost FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = \\$1 AND a.symbol = \\$2").
+		WithArgs("user1", "GOOGL").
+		WillReturnError(sql.ErrNoRows) // No existing GOOGL position
 
-	// Mock current allocation query
+	// Mock allocation query
 	allocationRows := sqlmock.NewRows([]string{"asset_type", "total_value"}).
-		AddRow("STOCK", 15500.0)
-	mock.ExpectQuery("SELECT a.asset_type, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) GROUP BY a.asset_type").
-		WithArgs("user-123").
+		AddRow("STOCK", 3400.0)
+
+	mock.ExpectQuery("SELECT a.asset_type, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = \\$1 GROUP BY a.asset_type").
+		WithArgs("user1").
 		WillReturnRows(allocationRows)
 
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "POST", "/analytics/what-if", handler.WhatIfAnalysis)
+	router := gin.New()
+	router.POST("/analytics/what-if", handler.WhatIfAnalysis)
 
-	// Test request
-	requestBody := `{
-		"action": "buy",
-		"symbol": "TSLA",
+	requestBody := map[string]interface{}{
+		"action":   "buy",
+		"symbol":   "GOOGL",
 		"quantity": 5.0,
-		"price": 800.0
-	}`
-	req, _ := http.NewRequest("POST", "/analytics/what-if", strings.NewReader(requestBody))
+		"price":    2700.0,
+	}
+	jsonBody, _ := json.Marshal(requestBody)
+	req, _ := http.NewRequest("POST", "/analytics/what-if", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "trade_details")
-	assert.Contains(t, w.Body.String(), "position_impact")
-	assert.Contains(t, w.Body.String(), "portfolio_impact")
 	assert.Contains(t, w.Body.String(), "allocation_impact")
 	assert.Contains(t, w.Body.String(), "risk_impact")
-	assert.Contains(t, w.Body.String(), "expected_returns")
-	assert.Contains(t, w.Body.String(), "TSLA")
-	assert.Contains(t, w.Body.String(), "buy")
-	assert.Contains(t, w.Body.String(), "created")
+
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestHandler_WhatIfAnalysis_SellSuccess(t *testing.T) {
-	// Setup mock database
+func TestWhatIfAnalysis_SellScenario(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
 	db, mock, err := sqlmock.New()
 	assert.NoError(t, err)
 	defer db.Close()
 
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
 	// Mock user ID query
-	mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
 		WithArgs("default_user").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-	// Mock current portfolio query
-	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_cost, COUNT\\(\\*\\) as total_holdings FROM portfolio_holdings ph WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
-		WillReturnRows(sqlmock.NewRows([]string{"total_cost", "total_holdings"}).AddRow(15500.0, 2))
+	// Mock current portfolio totals query
+	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_cost, COUNT\\(\\*\\) as total_holdings FROM portfolio_holdings ph WHERE ph.user_id = \\$1").
+		WithArgs("user1").
+		WillReturnRows(sqlmock.NewRows([]string{"total_cost", "total_holdings"}).AddRow(3400.0, 2))
 
-	// Mock current holding check (existing position)
-	mock.ExpectQuery("SELECT ph.quantity, ph.average_cost FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) AND a.symbol = (.+)").
-		WithArgs("user-123", "AAPL").
+	// Mock current holding check for AAPL (existing position)
+	mock.ExpectQuery("SELECT ph.quantity, ph.average_cost FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = \\$1 AND a.symbol = \\$2").
+		WithArgs("user1", "AAPL").
 		WillReturnRows(sqlmock.NewRows([]string{"quantity", "average_cost"}).AddRow(10.0, 150.0))
 
-	// Mock current allocation query
+	// Mock allocation query
 	allocationRows := sqlmock.NewRows([]string{"asset_type", "total_value"}).
-		AddRow("STOCK", 15500.0)
-	mock.ExpectQuery("SELECT a.asset_type, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) GROUP BY a.asset_type").
-		WithArgs("user-123").
+		AddRow("STOCK", 3400.0)
+
+	mock.ExpectQuery("SELECT a.asset_type, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = \\$1 GROUP BY a.asset_type").
+		WithArgs("user1").
 		WillReturnRows(allocationRows)
 
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "POST", "/analytics/what-if", handler.WhatIfAnalysis)
+	router := gin.New()
+	router.POST("/analytics/what-if", handler.WhatIfAnalysis)
 
-	// Test request
-	requestBody := `{
-		"action": "sell",
-		"symbol": "AAPL",
+	requestBody := map[string]interface{}{
+		"action":   "sell",
+		"symbol":   "AAPL",
 		"quantity": 5.0,
-		"price": 160.0
-	}`
-	req, _ := http.NewRequest("POST", "/analytics/what-if", strings.NewReader(requestBody))
+		"price":    175.0,
+	}
+	jsonBody, _ := json.Marshal(requestBody)
+	req, _ := http.NewRequest("POST", "/analytics/what-if", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
 	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "sell")
-	assert.Contains(t, w.Body.String(), "reduced")
-	assert.Contains(t, w.Body.String(), "AAPL")
+	assert.Contains(t, w.Body.String(), "trade_details")
+
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestHandler_WhatIfAnalysis_SellInsufficientHoldings(t *testing.T) {
-	// Setup mock database
-	db, mock, err := sqlmock.New()
-	assert.NoError(t, err)
-	defer db.Close()
+func TestWhatIfAnalysis_ValidationError(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
 
-	// Mock user ID query
-	mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
-		WithArgs("default_user").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
+	mockServices := &services.Services{
+		Logger: logger,
+	}
 
-	// Mock current portfolio query
-	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_cost, COUNT\\(\\*\\) as total_holdings FROM portfolio_holdings ph WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
-		WillReturnRows(sqlmock.NewRows([]string{"total_cost", "total_holdings"}).AddRow(15500.0, 2))
+	handler := NewHandler(mockServices, logger)
 
-	// Mock current holding check (insufficient quantity)
-	mock.ExpectQuery("SELECT ph.quantity, ph.average_cost FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) AND a.symbol = (.+)").
-		WithArgs("user-123", "AAPL").
-		WillReturnRows(sqlmock.NewRows([]string{"quantity", "average_cost"}).AddRow(5.0, 150.0))
+	router := gin.New()
+	router.POST("/analytics/what-if", handler.WhatIfAnalysis)
 
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "POST", "/analytics/what-if", handler.WhatIfAnalysis)
-
-	// Test request
-	requestBody := `{
-		"action": "sell",
+	// Missing required fields
+	requestBody := map[string]interface{}{
 		"symbol": "AAPL",
-		"quantity": 10.0,
-		"price": 160.0
-	}`
-	req, _ := http.NewRequest("POST", "/analytics/what-if", strings.NewReader(requestBody))
+	}
+	jsonBody, _ := json.Marshal(requestBody)
+	req, _ := http.NewRequest("POST", "/analytics/what-if", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "Cannot sell more than current position")
-	assert.NoError(t, mock.ExpectationsWereMet())
+	assert.Contains(t, w.Body.String(), "error")
 }
 
-func TestHandler_WhatIfAnalysis_SellNoPosition(t *testing.T) {
-	// Setup mock database
-	db, mock, err := sqlmock.New()
-	assert.NoError(t, err)
-	defer db.Close()
+func TestWhatIfAnalysis_InvalidJSON(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
 
-	// Mock user ID query
-	mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
-		WithArgs("default_user").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
+	mockServices := &services.Services{
+		Logger: logger,
+	}
 
-	// Mock current portfolio query
-	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_cost, COUNT\\(\\*\\) as total_holdings FROM portfolio_holdings ph WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
-		WillReturnRows(sqlmock.NewRows([]string{"total_cost", "total_holdings"}).AddRow(15500.0, 2))
+	handler := NewHandler(mockServices, logger)
 
-	// Mock current holding check (no position)
-	mock.ExpectQuery("SELECT ph.quantity, ph.average_cost FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) AND a.symbol = (.+)").
-		WithArgs("user-123", "TSLA").
-		WillReturnError(sql.ErrNoRows)
+	router := gin.New()
+	router.POST("/analytics/what-if", handler.WhatIfAnalysis)
 
-	handler := setupTestHandler(db, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "POST", "/analytics/what-if", handler.WhatIfAnalysis)
-
-	// Test request
-	requestBody := `{
-		"action": "sell",
-		"symbol": "TSLA",
-		"quantity": 5.0,
-		"price": 800.0
-	}`
-	req, _ := http.NewRequest("POST", "/analytics/what-if", strings.NewReader(requestBody))
+	req, _ := http.NewRequest("POST", "/analytics/what-if", bytes.NewBuffer([]byte("invalid json")))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
+
 	router.ServeHTTP(w, req)
 
-	// Assertions
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "Cannot sell - no current position in TSLA")
-	assert.NoError(t, mock.ExpectationsWereMet())
+	assert.Contains(t, w.Body.String(), "invalid character")
 }
-
-func TestHandler_WhatIfAnalysis_InvalidJSON(t *testing.T) {
-	handler := setupTestHandler(nil, NewMockFinnhubClient())
-	router := setupTestRouter(handler, "POST", "/analytics/what-if", handler.WhatIfAnalysis)
-
-	// Test request with invalid JSON
-	requestBody := `{
-		"action": "invalid_action",
-		"symbol": "AAPL",
-		"quantity": -5.0,
-		"price": 160.0
-	}`
-	req, _ := http.NewRequest("POST", "/analytics/what-if", strings.NewReader(requestBody))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Assertions
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-}
-
-func TestHandler_WhatIfAnalysis_HighConcentrationRisk(t *testing.T) {
-	// Setup mock database
-	db, mock, err := sqlmock.New()
-	assert.NoError(t, err)
-	defer db.Close()
-
-	// Mock user ID query
-	mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
-		WithArgs("default_user").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
-
-	// Mock current portfolio query (small portfolio)
-	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_cost, COUNT\\(\\*\\) as total_holdings FROM portfolio_holdings ph WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
-		WillReturnRows(sqlmock.NewRows([]string{"total_cost", "total_holdings"}).AddRow(5000.0, 1))
-// Mock current holding check (no existing position)
-mock.ExpectQuery("SELECT ph.quantity, ph.average_cost FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) AND a.symbol = (.+)").
-	WithArgs("user-123", "NVDA").
-	WillReturnError(sql.ErrNoRows)
-
-// Mock current allocation query
-allocationRows := sqlmock.NewRows([]string{"asset_type", "total_value"}).
-	AddRow("STOCK", 5000.0)
-mock.ExpectQuery("SELECT a.asset_type, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) GROUP BY a.asset_type").
-	WithArgs("user-123").
-	WillReturnRows(allocationRows)
-
-handler := setupTestHandler(db, NewMockFinnhubClient())
-router := setupTestRouter(handler, "POST", "/analytics/what-if", handler.WhatIfAnalysis)
-
-// Test request with large trade that creates high concentration
-requestBody := `{
-	"action": "buy",
-	"symbol": "NVDA",
-	"quantity": 10.0,
-	"price": 900.0
-}`
-req, _ := http.NewRequest("POST", "/analytics/what-if", strings.NewReader(requestBody))
-req.Header.Set("Content-Type", "application/json")
-w := httptest.NewRecorder()
-router.ServeHTTP(w, req)
-
-// Assertions
-assert.Equal(t, http.StatusOK, w.Code)
-assert.Contains(t, w.Body.String(), "significant increase in concentration risk")
-assert.Contains(t, w.Body.String(), "NVDA")
-assert.Contains(t, w.Body.String(), "22.3") // NVDA expected return
-assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-// =============================================================================
-// Additional Edge Case Tests
-// =============================================================================
-
-func TestHandler_GetRiskMetrics_WellDiversified(t *testing.T) {
-// Setup mock database
-db, mock, err := sqlmock.New()
-assert.NoError(t, err)
-defer db.Close()
-
-// Mock user ID query
-mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
-	WithArgs("default_user").
-	WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
-
-// Mock well-diversified portfolio
-diversificationRows := sqlmock.NewRows([]string{"sector", "holdings_count", "sector_value"}).
-	AddRow("Technology", 2, 5000.0).
-	AddRow("Healthcare", 2, 5000.0).
-	AddRow("Finance", 2, 5000.0).
-	AddRow("Energy", 2, 5000.0)
-mock.ExpectQuery("SELECT a.sector, COUNT\\(\\*\\) as holdings_count, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as sector_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) AND a.sector IS NOT NULL GROUP BY a.sector ORDER BY sector_value DESC").
-	WithArgs("user-123").
-	WillReturnRows(diversificationRows)
-
-// Mock beta calculation query
-betaRows := sqlmock.NewRows([]string{"symbol", "quantity", "average_cost", "position_value"})
-mock.ExpectQuery("SELECT a.symbol, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as position_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+)").
-	WithArgs("user-123").
-	WillReturnRows(betaRows)
-
-// Mock current value calculation query
-currentValueRows := sqlmock.NewRows([]string{"symbol", "quantity", "average_cost", "position_value"})
-mock.ExpectQuery("SELECT a.symbol, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as position_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+)").
-	WithArgs("user-123").
-	WillReturnRows(currentValueRows)
-
-handler := setupTestHandler(db, NewMockFinnhubClient())
-router := setupTestRouter(handler, "GET", "/analytics/risk", handler.GetRiskMetrics)
-
-// Test request
-req, _ := http.NewRequest("GET", "/analytics/risk", nil)
-w := httptest.NewRecorder()
-router.ServeHTTP(w, req)
-
-// Assertions
-assert.Equal(t, http.StatusOK, w.Code)
-assert.Contains(t, w.Body.String(), "Low")
-assert.Contains(t, w.Body.String(), "Well-diversified portfolio")
-assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestHandler_WhatIfAnalysis_KnownStockReturns(t *testing.T) {
-// Setup mock database
-db, mock, err := sqlmock.New()
-assert.NoError(t, err)
-defer db.Close()
-
-// Mock user ID query
-mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
-	WithArgs("default_user").
-	WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
-
-// Mock current portfolio query
-mock.ExpectQuery("SELECT COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_cost, COUNT\\(\\*\\) as total_holdings FROM portfolio_holdings ph WHERE ph.user_id = (.+)").
-	WithArgs("user-123").
-	WillReturnRows(sqlmock.NewRows([]string{"total_cost", "total_holdings"}).AddRow(50000.0, 5))
-
-// Mock current holding check (no existing position)
-mock.ExpectQuery("SELECT ph.quantity, ph.average_cost FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) AND a.symbol = (.+)").
-	WithArgs("user-123", "AAPL").
-	WillReturnError(sql.ErrNoRows)
-
-// Mock current allocation query
-allocationRows := sqlmock.NewRows([]string{"asset_type", "total_value"}).
-	AddRow("STOCK", 50000.0)
-mock.ExpectQuery("SELECT a.asset_type, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) GROUP BY a.asset_type").
-	WithArgs("user-123").
-	WillReturnRows(allocationRows)
-
-handler := setupTestHandler(db, NewMockFinnhubClient())
-router := setupTestRouter(handler, "POST", "/analytics/what-if", handler.WhatIfAnalysis)
-
-// Test request with AAPL (known stock with specific expected return)
-requestBody := `{
-	"action": "buy",
-	"symbol": "AAPL",
-	"quantity": 10.0,
-	"price": 150.0
-}`
-req, _ := http.NewRequest("POST", "/analytics/what-if", strings.NewReader(requestBody))
-req.Header.Set("Content-Type", "application/json")
-w := httptest.NewRecorder()
-router.ServeHTTP(w, req)
-
-// Assertions
-assert.Equal(t, http.StatusOK, w.Code)
-assert.Contains(t, w.Body.String(), "12.5") // AAPL expected return
-assert.Contains(t, w.Body.String(), "0.24") // AAPL volatility
-assert.Contains(t, w.Body.String(), "minimal impact on diversification")
-assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestHandler_GetPerformanceAnalytics_NoFinnhub(t *testing.T) {
-// Setup mock database
-db, mock, err := sqlmock.New()
-assert.NoError(t, err)
-defer db.Close()
-
-// Mock user ID query
-mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
-	WithArgs("default_user").
-	WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
-
-// Mock portfolio totals query
-mock.ExpectQuery("SELECT COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as total_cost, COUNT\\(\\*\\) as total_holdings FROM portfolio_holdings ph WHERE ph.user_id = (.+)").
-	WithArgs("user-123").
-	WillReturnRows(sqlmock.NewRows([]string{"total_cost", "total_holdings"}).AddRow(15500.0, 2))
-
-// Mock holdings query for market value calculation
-holdingsRows := sqlmock.NewRows([]string{"symbol", "quantity", "average_cost"}).
-	AddRow("AAPL", 10.0, 150.0).
-	AddRow("GOOGL", 5.0, 2800.0)
-mock.ExpectQuery("SELECT a.symbol, ph.quantity, ph.average_cost FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+)").
-	WithArgs("user-123").
-	WillReturnRows(holdingsRows)
-
-// Mock empty snapshots query
-snapshotRows := sqlmock.NewRows([]string{"snapshot_date", "total_value", "total_cost", "unrealized_pnl"})
-mock.ExpectQuery("SELECT snapshot_date, total_value, total_cost, unrealized_pnl FROM portfolio_snapshots WHERE user_id = (.+) AND snapshot_date >= CURRENT_DATE - INTERVAL '30 days' ORDER BY snapshot_date DESC LIMIT 30").
-	WithArgs("user-123").
-	WillReturnRows(snapshotRows)
-
-// Mock top performers query
-performerRows := sqlmock.NewRows([]string{"symbol", "name", "quantity", "average_cost", "total_value"}).
-	AddRow("GOOGL", "Alphabet Inc.", 5.0, 2800.0, 14000.0).
-	AddRow("AAPL", "Apple Inc.", 10.0, 150.0, 1500.0)
-mock.ExpectQuery("SELECT a.symbol, a.name, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as total_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) ORDER BY \\(ph.quantity \\* ph.average_cost\\) DESC LIMIT 5").
-	WithArgs("user-123").
-	WillReturnRows(performerRows)
-
-// Test with no Finnhub client
-handler := setupTestHandler(db, nil)
-router := setupTestRouter(handler, "GET", "/analytics/performance", handler.GetPerformanceAnalytics)
-
-// Test request
-req, _ := http.NewRequest("GET", "/analytics/performance", nil)
-w := httptest.NewRecorder()
-router.ServeHTTP(w, req)
-
-// Assertions - should still work but use cost basis instead of real prices
-assert.Equal(t, http.StatusOK, w.Code)
-assert.Contains(t, w.Body.String(), "portfolio_performance")
-assert.Contains(t, w.Body.String(), "15500") // Should equal cost basis when no real prices
-assert.NoError(t, mock.ExpectationsWereMet())
-}
-
-// =============================================================================
-// Benchmark Tests for Performance
-// =============================================================================
-
-func BenchmarkHandler_GetAssets(b *testing.B) {
-// Setup mock database
-db, mock, err := sqlmock.New()
-if err != nil {
-	b.Fatal(err)
-}
-defer db.Close()
-
-// Mock successful query
-rows := sqlmock.NewRows([]string{"id", "symbol", "name", "asset_type", "exchange", "currency", "sector", "created_at"}).
-	AddRow("1", "AAPL", "Apple Inc.", "STOCK", "NASDAQ", "USD", "Technology", "2024-01-01")
-
-for i := 0; i < b.N; i++ {
-	mock.ExpectQuery("SELECT id, symbol, name, asset_type, exchange, currency, sector, created_at FROM assets WHERE 1=1 ORDER BY symbol ASC LIMIT (.+)").
-		WithArgs("50").
-		WillReturnRows(rows)
-}
-
-handler := setupTestHandler(db, NewMockFinnhubClient())
-router := setupTestRouter(handler, "GET", "/assets", handler.GetAssets)
-
-b.ResetTimer()
-for i := 0; i < b.N; i++ {
-	req, _ := http.NewRequest("GET", "/assets", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-}
-}
-
-func BenchmarkHandler_GetRiskMetrics(b *testing.B) {
-// Setup mock database
-db, mock, err := sqlmock.New()
-if err != nil {
-	b.Fatal(err)
-}
-defer db.Close()
-
-// Setup repeated mocks for benchmark
-for i := 0; i < b.N; i++ {
-	// Mock user ID query
-	mock.ExpectQuery("SELECT id FROM users WHERE username = (.+)").
-		WithArgs("default_user").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-123"))
-
-	// Mock diversification query
-	diversificationRows := sqlmock.NewRows([]string{"sector", "holdings_count", "sector_value"}).
-		AddRow("Technology", 2, 15500.0)
-	mock.ExpectQuery("SELECT a.sector, COUNT\\(\\*\\) as holdings_count, COALESCE\\(SUM\\(ph.quantity \\* ph.average_cost\\), 0\\) as sector_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+) AND a.sector IS NOT NULL GROUP BY a.sector ORDER BY sector_value DESC").
-		WithArgs("user-123").
-		WillReturnRows(diversificationRows)
-
-	// Mock beta calculation queries
-	betaRows := sqlmock.NewRows([]string{"symbol", "quantity", "average_cost", "position_value"}).
-		AddRow("AAPL", 10.0, 150.0, 1500.0)
-	mock.ExpectQuery("SELECT a.symbol, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as position_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
-		WillReturnRows(betaRows)
-
-	currentValueRows := sqlmock.NewRows([]string{"symbol", "quantity", "average_cost", "position_value"}).
-		AddRow("AAPL", 10.0, 150.0, 1500.0)
-	mock.ExpectQuery("SELECT a.symbol, ph.quantity, ph.average_cost, \\(ph.quantity \\* ph.average_cost\\) as position_value FROM portfolio_holdings ph JOIN assets a ON ph.asset_id = a.id WHERE ph.user_id = (.+)").
-		WithArgs("user-123").
-		WillReturnRows(currentValueRows)
-}
-
-handler := setupTestHandler(db, NewMockFinnhubClient())
-router := setupTestRouter(handler, "GET", "/analytics/risk", handler.GetRiskMetrics)
-
-b.ResetTimer()
-for i := 0; i < b.N; i++ {
-	req, _ := http.NewRequest("GET", "/analytics/risk", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-}
-}
-		

@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -9,1011 +11,1743 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
+
+	"github.com/portfolio-management/api-gateway/internal/services"
 )
 
+// TestGetTransactions tests the GetTransactions handler
 func TestGetTransactions(t *testing.T) {
-	t.Run("Success - with pagination", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+	tests := []struct {
+		name           string
+		queryParams    string
+		setupMock      func(sqlmock.Sqlmock)
+		expectedStatus int
+		expectedBody   []string
+	}{
+		{
+			name:        "successful transaction listing with pagination",
+			queryParams: "?limit=10&offset=0",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		// Setup mock expectations
-		rows := sqlmock.NewRows([]string{"id", "user_id", "asset_id", "type", "quantity", "price", "timestamp"}).
-			AddRow(1, 1, 1, "BUY", 10, 100.50, "2025-01-01T00:00:00Z").
-			AddRow(2, 1, 2, "SELL", 5, 200.75, "2025-01-02T00:00:00Z")
+				// Mock transactions query
+				rows := sqlmock.NewRows([]string{
+					"id", "transaction_type", "quantity", "price", "fees",
+					"total_amount", "transaction_date", "notes", "symbol", "name",
+				}).
+					AddRow("tx1", "BUY", 10.0, 150.0, 1.0, 1501.0, "2024-01-01", "Test buy", "AAPL", "Apple Inc.").
+					AddRow("tx2", "SELL", 5.0, 160.0, 1.0, 799.0, "2024-01-02", "Test sell", "AAPL", "Apple Inc.")
 
-		mock.ExpectQuery(`SELECT .* FROM transactions WHERE user_id = \$1 ORDER BY timestamp DESC LIMIT \$2 OFFSET \$3`).
-			WithArgs(1, 10, 0).
-			WillReturnRows(rows)
+				mock.ExpectQuery("SELECT (.+) FROM transactions t JOIN assets a ON t.asset_id = a.id WHERE t.user_id = \\$1 ORDER BY t.transaction_date DESC LIMIT \\$2 OFFSET \\$3").
+					WithArgs("user1", "10", "0").
+					WillReturnRows(rows)
 
-		// Create test context
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/transactions?limit=10&offset=0", nil)
-		c.Set("userID", int64(1))
+				// Mock count query
+				mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM transactions t JOIN assets a ON t.asset_id = a.id WHERE t.user_id = \\$1").
+					WithArgs("user1").
+					WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"transactions", "total_count", "AAPL", "BUY", "SELL"},
+		},
+		{
+			name:        "transaction filtering by type",
+			queryParams: "?type=BUY&limit=10&offset=0",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		// Call handler
-		GetTransactions(db)(c)
+				// Mock filtered transactions query
+				rows := sqlmock.NewRows([]string{
+					"id", "transaction_type", "quantity", "price", "fees",
+					"total_amount", "transaction_date", "notes", "symbol", "name",
+				}).
+					AddRow("tx1", "BUY", 10.0, 150.0, 1.0, 1501.0, "2024-01-01", "Test buy", "AAPL", "Apple Inc.")
 
-		// Verify
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+				mock.ExpectQuery("SELECT (.+) FROM transactions t JOIN assets a ON t.asset_id = a.id WHERE t.user_id = \\$1 AND t.transaction_type = \\$2 ORDER BY t.transaction_date DESC LIMIT \\$3 OFFSET \\$4").
+					WithArgs("user1", "BUY", "10", "0").
+					WillReturnRows(rows)
 
-	t.Run("Error - invalid limit parameter", func(t *testing.T) {
-		db, _, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+				// Mock count query
+				mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM transactions t JOIN assets a ON t.asset_id = a.id WHERE t.user_id = \\$1 AND t.transaction_type = \\$2").
+					WithArgs("user1", "BUY").
+					WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"transactions", "BUY"},
+		},
+	}
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/transactions?limit=invalid", nil)
-		c.Set("userID", int64(1))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			gin.SetMode(gin.TestMode)
+			logger, _ := zap.NewDevelopment()
 
-		GetTransactions(db)(c)
+			// Create mock database
+			db, mock, err := sqlmock.New()
+			assert.NoError(t, err)
+			defer db.Close()
 
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-	})
+			mockServices := &services.Services{
+				DB:     db,
+				Logger: logger,
+			}
 
-	t.Run("Error - database error", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+			handler := NewHandler(mockServices, logger)
 
-		mock.ExpectQuery(`SELECT .* FROM transactions`).
-			WillReturnError(sql.ErrConnDone)
+			tt.setupMock(mock)
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/transactions", nil)
-		c.Set("userID", int64(1))
+			router := gin.New()
+			router.GET("/transactions", handler.GetTransactions)
 
-		GetTransactions(db)(c)
+			req, _ := http.NewRequest("GET", "/transactions"+tt.queryParams, nil)
+			w := httptest.NewRecorder()
 
-		assert.Equal(t, http.StatusInternalServerError, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			router.ServeHTTP(w, req)
 
-	t.Run("Success - filter by transaction type", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			for _, expectedStr := range tt.expectedBody {
+				assert.Contains(t, w.Body.String(), expectedStr)
+			}
 
-		rows := sqlmock.NewRows([]string{"id", "user_id", "asset_id", "type", "quantity", "price", "timestamp"}).
-			AddRow(1, 1, 1, "BUY", 10, 100.50, "2025-01-01T00:00:00Z")
-
-		mock.ExpectQuery(`SELECT .* FROM transactions WHERE user_id = \$1 AND type = \$2`).
-			WithArgs(1, "BUY").
-			WillReturnRows(rows)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/transactions?type=BUY", nil)
-		c.Set("userID", int64(1))
-
-		GetTransactions(db)(c)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("Success - filter by asset symbol", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
-
-		// First mock the asset lookup
-		mock.ExpectQuery(`SELECT id FROM assets WHERE symbol = \$1`).
-			WithArgs("AAPL").
-			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
-
-		// Then mock the transaction query
-		rows := sqlmock.NewRows([]string{"id", "user_id", "asset_id", "type", "quantity", "price", "timestamp"}).
-			AddRow(1, 1, 1, "BUY", 10, 100.50, "2025-01-01T00:00:00Z")
-
-		mock.ExpectQuery(`SELECT .* FROM transactions WHERE user_id = \$1 AND asset_id = \$2`).
-			WithArgs(1, 1).
-			WillReturnRows(rows)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/transactions?symbol=AAPL", nil)
-		c.Set("userID", int64(1))
-
-		GetTransactions(db)(c)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("Error - invalid transaction type", func(t *testing.T) {
-		db, _, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/transactions?type=INVALID", nil)
-		c.Set("userID", int64(1))
-
-		GetTransactions(db)(c)
-
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-	})
-
-	t.Run("Error - asset not found", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
-
-		mock.ExpectQuery(`SELECT id FROM assets WHERE symbol = \$1`).
-			WithArgs("UNKNOWN").
-			WillReturnError(sql.ErrNoRows)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/transactions?symbol=UNKNOWN", nil)
-		c.Set("userID", int64(1))
-
-		GetTransactions(db)(c)
-
-		assert.Equal(t, http.StatusNotFound, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
-func TestCreateTransaction(t *testing.T) {
-	t.Run("Success - BUY transaction", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+func TestGetTransactions_NilDB(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
 
-		// Mock asset lookup
-		mock.ExpectQuery(`SELECT id FROM assets WHERE symbol = \$1`).
-			WithArgs("AAPL").
-			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+	mockServices := &services.Services{
+		DB:     nil, // nil database
+		Logger: logger,
+	}
 
-		// Mock balance check
-		mock.ExpectQuery(`SELECT balance FROM accounts WHERE user_id = \$1`).
-			WithArgs(1).
-			WillReturnRows(sqlmock.NewRows([]string{"balance"}).AddRow(10000.00))
+	handler := NewHandler(mockServices, logger)
 
-		// Mock transaction begin
-		mock.ExpectBegin()
-		// Mock transaction insert
-		mock.ExpectExec(`INSERT INTO transactions`).
-			WithArgs(1, 1, "BUY", 10, 150.00, sqlmock.AnyArg()).
-			WillReturnResult(sqlmock.NewResult(1, 1))
-		// Mock balance update
-		mock.ExpectExec(`UPDATE accounts SET balance = balance - \$1 WHERE user_id = \$2`).
-			WithArgs(1500.00, 1).
-			WillReturnResult(sqlmock.NewResult(0, 1))
-		// Mock transaction commit
-		mock.ExpectCommit()
+	router := gin.New()
+	router.GET("/transactions", handler.GetTransactions)
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/transactions", strings.NewReader(`{
-			"symbol": "AAPL",
-			"type": "BUY",
-			"quantity": 10,
-			"price": 150.00
-		}`))
-		c.Request.Header.Set("Content-Type", "application/json")
-		c.Set("userID", int64(1))
+	req, _ := http.NewRequest("GET", "/transactions", nil)
+	w := httptest.NewRecorder()
 
-		CreateTransaction(db)(c)
+	router.ServeHTTP(w, req)
 
-		assert.Equal(t, http.StatusCreated, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("Error - insufficient funds", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
-
-		// Mock asset lookup
-		mock.ExpectQuery(`SELECT id FROM assets WHERE symbol = \$1`).
-			WithArgs("AAPL").
-			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
-
-		// Mock balance check
-		mock.ExpectQuery(`SELECT balance FROM accounts WHERE user_id = \$1`).
-			WithArgs(1).
-			WillReturnRows(sqlmock.NewRows([]string{"balance"}).AddRow(100.00))
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/transactions", strings.NewReader(`{
-			"symbol": "AAPL",
-			"type": "BUY",
-			"quantity": 10,
-			"price": 150.00
-		}`))
-		c.Request.Header.Set("Content-Type", "application/json")
-		c.Set("userID", int64(1))
-
-		CreateTransaction(db)(c)
-
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-		assert.Contains(t, w.Body.String(), "insufficient funds")
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("Error - invalid transaction type", func(t *testing.T) {
-		db, _, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/transactions", strings.NewReader(`{
-			"symbol": "AAPL",
-			"type": "INVALID",
-			"quantity": 10,
-			"price": 150.00
-		}`))
-		c.Request.Header.Set("Content-Type", "application/json")
-		c.Set("userID", int64(1))
-
-		CreateTransaction(db)(c)
-
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-	})
-
-	t.Run("Error - negative quantity", func(t *testing.T) {
-		db, _, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/transactions", strings.NewReader(`{
-			"symbol": "AAPL",
-			"type": "BUY",
-			"quantity": -10,
-			"price": 150.00
-		}`))
-		c.Request.Header.Set("Content-Type", "application/json")
-		c.Set("userID", int64(1))
-
-		CreateTransaction(db)(c)
-
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-	})
-
-	t.Run("Success - SELL transaction", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
-
-		// Mock asset lookup
-		mock.ExpectQuery(`SELECT id FROM assets WHERE symbol = \$1`).
-			WithArgs("AAPL").
-			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
-
-		// Mock position check
-		mock.ExpectQuery(`SELECT quantity FROM positions WHERE user_id = \$1 AND asset_id = \$2`).
-			WithArgs(1, 1).
-			WillReturnRows(sqlmock.NewRows([]string{"quantity"}).AddRow(20))
-
-		// Mock transaction begin
-		mock.ExpectBegin()
-		// Mock transaction insert
-		mock.ExpectExec(`INSERT INTO transactions`).
-			WithArgs(1, 1, "SELL", 10, 150.00, sqlmock.AnyArg()).
-			WillReturnResult(sqlmock.NewResult(1, 1))
-		// Mock balance update
-		mock.ExpectExec(`UPDATE accounts SET balance = balance + \$1 WHERE user_id = \$2`).
-			WithArgs(1500.00, 1).
-			WillReturnResult(sqlmock.NewResult(0, 1))
-		// Mock position update
-		mock.ExpectExec(`UPDATE positions SET quantity = quantity - \$1 WHERE user_id = \$2 AND asset_id = \$3`).
-			WithArgs(10, 1, 1).
-			WillReturnResult(sqlmock.NewResult(0, 1))
-		// Mock transaction commit
-		mock.ExpectCommit()
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/transactions", strings.NewReader(`{
-			"symbol": "AAPL",
-			"type": "SELL",
-			"quantity": 10,
-			"price": 150.00
-		}`))
-		c.Request.Header.Set("Content-Type", "application/json")
-		c.Set("userID", int64(1))
-
-		CreateTransaction(db)(c)
-
-		assert.Equal(t, http.StatusCreated, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("Error - insufficient position quantity", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
-
-		// Mock asset lookup
-		mock.ExpectQuery(`SELECT id FROM assets WHERE symbol = \$1`).
-			WithArgs("AAPL").
-			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
-
-		// Mock position check
-		mock.ExpectQuery(`SELECT quantity FROM positions WHERE user_id = \$1 AND asset_id = \$2`).
-			WithArgs(1, 1).
-			WillReturnRows(sqlmock.NewRows([]string{"quantity"}).AddRow(5))
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/transactions", strings.NewReader(`{
-			"symbol": "AAPL",
-			"type": "SELL",
-			"quantity": 10,
-			"price": 150.00
-		}`))
-		c.Request.Header.Set("Content-Type", "application/json")
-		c.Set("userID", int64(1))
-
-		CreateTransaction(db)(c)
-
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-		assert.Contains(t, w.Body.String(), "insufficient quantity")
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "Failed to fetch transactions")
 }
 
+// TestCreateTransaction tests the CreateTransaction handler
+func TestCreateTransaction_BuyOrder(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	// Setup mocks for successful buy transaction
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+		WithArgs("default_user").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
+
+	mock.ExpectQuery("SELECT id FROM assets WHERE symbol = \\$1").
+		WithArgs("AAPL").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("asset1"))
+
+	mock.ExpectBegin()
+
+	// total_amount = 10 * 150 + 1 = 1501 for BUY
+	mock.ExpectQuery("INSERT INTO transactions \\(user_id, asset_id, transaction_type, quantity, price, fees, total_amount, notes\\) VALUES \\(\\$1, \\$2, \\$3, \\$4, \\$5, \\$6, \\$7, \\$8\\) RETURNING id").
+		WithArgs("user1", "asset1", "BUY", 10.0, 150.0, 1.0, 1501.0, "Test buy transaction").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("tx1"))
+
+	mock.ExpectExec("INSERT INTO portfolio_holdings \\(user_id, asset_id, quantity, average_cost\\) VALUES \\(\\$1, \\$2, \\$3, \\$4\\) ON CONFLICT \\(user_id, asset_id\\) DO UPDATE SET (.+)").
+		WithArgs("user1", "asset1", 10.0, 150.0).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectCommit()
+
+	router := gin.New()
+	router.POST("/transactions", handler.CreateTransaction)
+
+	requestBody := map[string]interface{}{
+		"symbol":           "AAPL",
+		"transaction_type": "BUY",
+		"quantity":         10.0,
+		"price":            150.0,
+		"fees":             1.0,
+		"notes":            "Test buy transaction",
+	}
+
+	jsonBody, _ := json.Marshal(requestBody)
+	req, _ := http.NewRequest("POST", "/transactions", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	assert.Contains(t, w.Body.String(), "Transaction created successfully")
+	assert.Contains(t, w.Body.String(), "tx1")
+	assert.Contains(t, w.Body.String(), "AAPL")
+	assert.Contains(t, w.Body.String(), "BUY")
+	assert.Contains(t, w.Body.String(), "1501")
+
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCreateTransaction_SellOrder(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	// Setup mocks for successful sell transaction
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+		WithArgs("default_user").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
+
+	mock.ExpectQuery("SELECT id FROM assets WHERE symbol = \\$1").
+		WithArgs("AAPL").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("asset1"))
+
+	mock.ExpectBegin()
+
+	// total_amount = 5 * 160 - 1 = 799 for SELL
+	mock.ExpectQuery("INSERT INTO transactions \\(user_id, asset_id, transaction_type, quantity, price, fees, total_amount, notes\\) VALUES \\(\\$1, \\$2, \\$3, \\$4, \\$5, \\$6, \\$7, \\$8\\) RETURNING id").
+		WithArgs("user1", "asset1", "SELL", 5.0, 160.0, 1.0, 799.0, "Test sell transaction").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("tx2"))
+
+	// Mock current holdings check for SELL
+	mock.ExpectQuery("SELECT quantity FROM portfolio_holdings WHERE user_id = \\$1 AND asset_id = \\$2").
+		WithArgs("user1", "asset1").
+		WillReturnRows(sqlmock.NewRows([]string{"quantity"}).AddRow(10.0))
+
+	// Mock portfolio holdings update for SELL (10 - 5 = 5 remaining)
+	mock.ExpectExec("UPDATE portfolio_holdings SET quantity = \\$1, updated_at = NOW\\(\\) WHERE user_id = \\$2 AND asset_id = \\$3").
+		WithArgs(5.0, "user1", "asset1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectCommit()
+
+	router := gin.New()
+	router.POST("/transactions", handler.CreateTransaction)
+
+	requestBody := map[string]interface{}{
+		"symbol":           "AAPL",
+		"transaction_type": "SELL",
+		"quantity":         5.0,
+		"price":            160.0,
+		"fees":             1.0,
+		"notes":            "Test sell transaction",
+	}
+
+	jsonBody, _ := json.Marshal(requestBody)
+	req, _ := http.NewRequest("POST", "/transactions", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	assert.Contains(t, w.Body.String(), "Transaction created successfully")
+	assert.Contains(t, w.Body.String(), "tx2")
+	assert.Contains(t, w.Body.String(), "AAPL")
+	assert.Contains(t, w.Body.String(), "SELL")
+	assert.Contains(t, w.Body.String(), "799")
+
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCreateTransaction_InsufficientHoldings(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	// Setup mocks for insufficient holdings
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+		WithArgs("default_user").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
+
+	mock.ExpectQuery("SELECT id FROM assets WHERE symbol = \\$1").
+		WithArgs("AAPL").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("asset1"))
+
+	mock.ExpectBegin()
+
+	mock.ExpectQuery("INSERT INTO transactions \\(user_id, asset_id, transaction_type, quantity, price, fees, total_amount, notes\\) VALUES \\(\\$1, \\$2, \\$3, \\$4, \\$5, \\$6, \\$7, \\$8\\) RETURNING id").
+		WithArgs("user1", "asset1", "SELL", 15.0, 160.0, 1.0, 2399.0, "").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("tx4"))
+
+	// Mock current holdings check (only 10 available)
+	mock.ExpectQuery("SELECT quantity FROM portfolio_holdings WHERE user_id = \\$1 AND asset_id = \\$2").
+		WithArgs("user1", "asset1").
+		WillReturnRows(sqlmock.NewRows([]string{"quantity"}).AddRow(10.0))
+
+	// Expect rollback due to insufficient holdings
+	mock.ExpectRollback()
+
+	router := gin.New()
+	router.POST("/transactions", handler.CreateTransaction)
+
+	requestBody := map[string]interface{}{
+		"symbol":           "AAPL",
+		"transaction_type": "SELL",
+		"quantity":         15.0, // More than available
+		"price":            160.0,
+		"fees":             1.0,
+	}
+
+	jsonBody, _ := json.Marshal(requestBody)
+	req, _ := http.NewRequest("POST", "/transactions", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "Insufficient holdings to sell")
+
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCreateTransaction_ValidationError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	mockServices := &services.Services{
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	router := gin.New()
+	router.POST("/transactions", handler.CreateTransaction)
+
+	// Test missing required symbol
+	requestBody := map[string]interface{}{
+		"transaction_type": "BUY",
+		"quantity":         10.0,
+		"price":            150.0,
+	}
+
+	jsonBody, _ := json.Marshal(requestBody)
+	req, _ := http.NewRequest("POST", "/transactions", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "Symbol")
+}
+
+// TestGetTransaction tests the GetTransaction handler
+func TestGetTransaction_Success(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	// Mock user ID query
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+		WithArgs("default_user").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
+
+	// Mock transaction query
+	rows := sqlmock.NewRows([]string{
+		"id", "transaction_type", "quantity", "price", "fees",
+		"total_amount", "transaction_date", "notes", "symbol", "name", "asset_type",
+	}).AddRow("tx1", "BUY", 10.0, 150.0, 1.0, 1501.0, "2024-01-01", "Test transaction", "AAPL", "Apple Inc.", "STOCK")
+
+	mock.ExpectQuery("SELECT (.+) FROM transactions t JOIN assets a ON t.asset_id = a.id WHERE t.id = \\$1 AND t.user_id = \\$2").
+		WithArgs("tx1", "user1").
+		WillReturnRows(rows)
+
+	router := gin.New()
+	router.GET("/transactions/:id", handler.GetTransaction)
+
+	req, _ := http.NewRequest("GET", "/transactions/tx1", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "tx1")
+	assert.Contains(t, w.Body.String(), "BUY")
+	assert.Contains(t, w.Body.String(), "AAPL")
+	assert.Contains(t, w.Body.String(), "Apple Inc.")
+	assert.Contains(t, w.Body.String(), "STOCK")
+	assert.Contains(t, w.Body.String(), "1501")
+
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetTransaction_NotFound(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	// Mock user ID query
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+		WithArgs("default_user").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
+
+	// Mock transaction query that returns no rows
+	mock.ExpectQuery("SELECT (.+) FROM transactions t JOIN assets a ON t.asset_id = a.id WHERE t.id = \\$1 AND t.user_id = \\$2").
+		WithArgs("nonexistent", "user1").
+		WillReturnError(sql.ErrNoRows)
+
+	router := gin.New()
+	router.GET("/transactions/:id", handler.GetTransaction)
+
+	req, _ := http.NewRequest("GET", "/transactions/nonexistent", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "Transaction not found")
+
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestUpdateTransaction tests the UpdateTransaction handler
+func TestUpdateTransaction_Success(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	// Mock user ID query
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+		WithArgs("default_user").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
+
+	// Mock existing transaction query
+	mock.ExpectQuery("SELECT quantity, price, fees, notes, transaction_type FROM transactions WHERE id = \\$1 AND user_id = \\$2").
+		WithArgs("tx1", "user1").
+		WillReturnRows(sqlmock.NewRows([]string{"quantity", "price", "fees", "notes", "transaction_type"}).
+			AddRow(10.0, 150.0, 1.0, "Old notes", "BUY"))
+
+	// Mock update query - new total: 15 * 150 + 1 = 2251
+	mock.ExpectExec("UPDATE transactions SET quantity = \\$1, price = \\$2, fees = \\$3, notes = \\$4, total_amount = \\$5 WHERE id = \\$6 AND user_id = \\$7").
+		WithArgs(15.0, 150.0, 1.0, "Updated notes", 2251.0, "tx1", "user1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	router := gin.New()
+	router.PUT("/transactions/:id", handler.UpdateTransaction)
+
+	requestBody := map[string]interface{}{
+		"quantity": 15.0,
+		"notes":    "Updated notes",
+	}
+
+	jsonBody, _ := json.Marshal(requestBody)
+	req, _ := http.NewRequest("PUT", "/transactions/tx1", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Transaction updated successfully")
+	assert.Contains(t, w.Body.String(), "tx1")
+
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestDeleteTransaction tests the DeleteTransaction handler
+func TestDeleteTransaction_Success(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	// Mock user ID query
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+		WithArgs("default_user").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
+
+	// Mock transaction existence check query
+	mock.ExpectQuery("SELECT t.transaction_type, t.quantity, a.symbol FROM transactions t JOIN assets a ON t.asset_id = a.id WHERE t.id = \\$1 AND t.user_id = \\$2").
+		WithArgs("tx1", "user1").
+		WillReturnRows(sqlmock.NewRows([]string{"transaction_type", "quantity", "symbol"}).AddRow("BUY", 10.0, "AAPL"))
+
+	// Mock delete query
+	mock.ExpectExec("DELETE FROM transactions WHERE id = \\$1 AND user_id = \\$2").
+		WithArgs("tx1", "user1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	router := gin.New()
+	router.DELETE("/transactions/:id", handler.DeleteTransaction)
+
+	req, _ := http.NewRequest("DELETE", "/transactions/tx1", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Transaction deleted successfully")
+	assert.Contains(t, w.Body.String(), "tx1")
+
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestGetNotifications tests the GetNotifications handler
+func TestGetNotifications_Success(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	// Mock user ID query
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+		WithArgs("default_user").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
+
+	// Mock notifications query
+	rows := sqlmock.NewRows([]string{
+		"id", "title", "message", "notification_type", "is_read", "created_at",
+	}).
+		AddRow("notif1", "Price Alert", "AAPL reached target", "PRICE_ALERT", false, "2024-01-01").
+		AddRow("notif2", "Portfolio Update", "Holdings updated", "PORTFOLIO_UPDATE", true, "2024-01-02")
+
+	mock.ExpectQuery("SELECT id, title, message, notification_type, is_read, created_at FROM notifications WHERE user_id = \\$1 ORDER BY created_at DESC LIMIT \\$2").
+		WithArgs("user1", "50").
+		WillReturnRows(rows)
+
+	router := gin.New()
+	router.GET("/notifications", handler.GetNotifications)
+
+	req, _ := http.NewRequest("GET", "/notifications", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "notifications")
+	assert.Contains(t, w.Body.String(), "unread_count")
+	assert.Contains(t, w.Body.String(), "Price Alert")
+	assert.Contains(t, w.Body.String(), "Portfolio Update")
+	assert.Contains(t, w.Body.String(), "1") // 1 unread
+
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestMarkNotificationRead tests the MarkNotificationRead handler
+func TestMarkNotificationRead_Success(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	// Mock user ID query
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+		WithArgs("default_user").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
+
+	// Mock notification check (unread)
+	mock.ExpectQuery("SELECT is_read FROM notifications WHERE id = \\$1 AND user_id = \\$2").
+		WithArgs("notif1", "user1").
+		WillReturnRows(sqlmock.NewRows([]string{"is_read"}).AddRow(false))
+
+	// Mock update query
+	mock.ExpectExec("UPDATE notifications SET is_read = true WHERE id = \\$1 AND user_id = \\$2").
+		WithArgs("notif1", "user1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	router := gin.New()
+	router.PUT("/notifications/:id/read", handler.MarkNotificationRead)
+
+	req, _ := http.NewRequest("PUT", "/notifications/notif1/read", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Notification marked as read")
+	assert.Contains(t, w.Body.String(), "notif1")
+
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestUpdateNotificationSettings tests the UpdateNotificationSettings handler
+func TestUpdateNotificationSettings_Success(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	// Mock user ID query
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+		WithArgs("default_user").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
+
+	router := gin.New()
+	router.PUT("/settings/notifications", handler.UpdateNotificationSettings)
+
+	requestBody := map[string]interface{}{
+		"price_alerts":        true,
+		"portfolio_updates":   true,
+		"market_news":         false,
+		"performance_reports": true,
+		"email_enabled":       true,
+		"sms_enabled":         false,
+		"web_push_enabled":    true,
+	}
+
+	jsonBody, _ := json.Marshal(requestBody)
+	req, _ := http.NewRequest("PUT", "/settings/notifications", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Notification settings updated successfully")
+	assert.Contains(t, w.Body.String(), "price_alerts")
+	assert.Contains(t, w.Body.String(), "portfolio_updates")
+
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestWebSocketHandler tests the WebSocketHandler
+func TestWebSocketHandler_Success(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	mockServices := &services.Services{
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	router := gin.New()
+	router.GET("/ws", handler.WebSocketHandler)
+
+	req, _ := http.NewRequest("GET", "/ws", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "WebSocket real-time updates")
+	assert.Contains(t, w.Body.String(), "Available")
+	assert.Contains(t, w.Body.String(), "Real-time portfolio value updates")
+	assert.Contains(t, w.Body.String(), "ws://localhost:8080/api/v1/ws")
+}
+
+// TestUtilityFunctions tests the utility helper functions
+func TestGetAssetIDBySymbol_Success(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	mock.ExpectQuery("SELECT id FROM assets WHERE symbol = \\$1").
+		WithArgs("AAPL").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("asset1"))
+
+	assetID, err := handler.getAssetIDBySymbol("AAPL")
+
+	assert.NoError(t, err)
+	assert.Equal(t, "asset1", assetID)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetUserID_Success(t *testing.T) {
+	// Setup
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	// Create mock database
+	db, mock, err := sqlmock.New()
+	assert.NoError(t, err)
+	defer db.Close()
+
+	mockServices := &services.Services{
+		DB:     db,
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+		WithArgs("default_user").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
+
+	userID, err := handler.getUserID("default_user")
+
+	assert.NoError(t, err)
+	assert.Equal(t, "user1", userID)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCreateTransaction_ValidationErrors(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	mockServices := &services.Services{
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	tests := []struct {
+		name           string
+		requestBody    map[string]interface{}
+		expectedStatus int
+		expectedError  string
+	}{
+		{
+			name:           "missing required symbol",
+			requestBody:    map[string]interface{}{"transaction_type": "BUY", "quantity": 10.0, "price": 150.0},
+			expectedStatus: http.StatusBadRequest,
+			expectedError:  "Symbol",
+		},
+		{
+			name:           "invalid transaction type",
+			requestBody:    map[string]interface{}{"symbol": "AAPL", "transaction_type": "INVALID", "quantity": 10.0, "price": 150.0},
+			expectedStatus: http.StatusBadRequest,
+			expectedError:  "TransactionType",
+		},
+		{
+			name:           "negative quantity",
+			requestBody:    map[string]interface{}{"symbol": "AAPL", "transaction_type": "BUY", "quantity": -10.0, "price": 150.0},
+			expectedStatus: http.StatusBadRequest,
+			expectedError:  "Quantity",
+		},
+		{
+			name:           "negative price",
+			requestBody:    map[string]interface{}{"symbol": "AAPL", "transaction_type": "BUY", "quantity": 10.0, "price": -150.0},
+			expectedStatus: http.StatusBadRequest,
+			expectedError:  "Price",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router := gin.New()
+			router.POST("/transactions", handler.CreateTransaction)
+
+			jsonBody, _ := json.Marshal(tt.requestBody)
+			req, _ := http.NewRequest("POST", "/transactions", bytes.NewBuffer(jsonBody))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			router.ServeHTTP(w, req)
+
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			assert.Contains(t, w.Body.String(), tt.expectedError)
+		})
+	}
+}
+
+// TestGetTransaction tests the GetTransaction handler
 func TestGetTransaction(t *testing.T) {
-	t.Run("Success - retrieve transaction", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+	tests := []struct {
+		name           string
+		transactionID  string
+		setupMock      func(sqlmock.Sqlmock)
+		expectedStatus int
+		expectedBody   []string
+	}{
+		{
+			name:          "successful transaction retrieval",
+			transactionID: "tx1",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		rows := sqlmock.NewRows([]string{"id", "user_id", "asset_id", "type", "quantity", "price", "timestamp"}).
-			AddRow(1, 1, 1, "BUY", 10, 100.50, "2025-01-01T00:00:00Z")
+				// Mock transaction query
+				rows := sqlmock.NewRows([]string{
+					"id", "transaction_type", "quantity", "price", "fees",
+					"total_amount", "transaction_date", "notes", "symbol", "name", "asset_type",
+				}).AddRow("tx1", "BUY", 10.0, 150.0, 1.0, 1501.0, "2024-01-01", "Test transaction", "AAPL", "Apple Inc.", "STOCK")
 
-		mock.ExpectQuery(`SELECT .* FROM transactions WHERE id = \$1 AND user_id = \$2`).
-			WithArgs(1, 1).
-			WillReturnRows(rows)
+				mock.ExpectQuery("SELECT (.+) FROM transactions t JOIN assets a ON t.asset_id = a.id WHERE t.id = \\$1 AND t.user_id = \\$2").
+					WithArgs("tx1", "user1").
+					WillReturnRows(rows)
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"tx1", "BUY", "AAPL", "Apple Inc.", "STOCK", "1501"},
+		},
+		{
+			name:          "transaction not found",
+			transactionID: "nonexistent",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/transactions/1", nil)
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "1"}}
+				// Mock transaction query that returns no rows
+				mock.ExpectQuery("SELECT (.+) FROM transactions t JOIN assets a ON t.asset_id = a.id WHERE t.id = \\$1 AND t.user_id = \\$2").
+					WithArgs("nonexistent", "user1").
+					WillReturnError(sql.ErrNoRows)
+			},
+			expectedStatus: http.StatusNotFound,
+			expectedBody:   []string{"Transaction not found"},
+		},
+		{
+			name:           "empty transaction ID",
+			transactionID:  "",
+			setupMock:      func(mock sqlmock.Sqlmock) {}, // No mock needed
+			expectedStatus: http.StatusNotFound,
+			expectedBody:   []string{"404 page not found"},
+		},
+	}
 
-		GetTransaction(db)(c)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			gin.SetMode(gin.TestMode)
+			logger, _ := zap.NewDevelopment()
 
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			// Create mock database
+			db, mock, err := sqlmock.New()
+			assert.NoError(t, err)
+			defer db.Close()
 
-	t.Run("Error - transaction not found", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+			mockServices := &services.Services{
+				DB:     db,
+				Logger: logger,
+			}
 
-		mock.ExpectQuery(`SELECT .* FROM transactions WHERE id = \$1 AND user_id = \$2`).
-			WithArgs(999, 1).
-			WillReturnError(sql.ErrNoRows)
+			handler := NewHandler(mockServices, logger)
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/transactions/999", nil)
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "999"}}
+			tt.setupMock(mock)
 
-		GetTransaction(db)(c)
+			router := gin.New()
+			router.GET("/transactions/:id", handler.GetTransaction)
 
-		assert.Equal(t, http.StatusNotFound, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			url := "/transactions/" + tt.transactionID
+			req, _ := http.NewRequest("GET", url, nil)
+			w := httptest.NewRecorder()
 
-	t.Run("Error - unauthorized access", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+			router.ServeHTTP(w, req)
 
-		// Transaction exists but belongs to different user
-		rows := sqlmock.NewRows([]string{"id", "user_id"}).
-			AddRow(1, 2)
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			for _, expectedStr := range tt.expectedBody {
+				assert.Contains(t, w.Body.String(), expectedStr)
+			}
 
-		mock.ExpectQuery(`SELECT .* FROM transactions WHERE id = \$1 AND user_id = \$2`).
-			WithArgs(1, 1).
-			WillReturnRows(rows)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/transactions/1", nil)
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "1"}}
-
-		GetTransaction(db)(c)
-
-		assert.Equal(t, http.StatusNotFound, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("Error - invalid transaction ID", func(t *testing.T) {
-		db, _, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/transactions/invalid", nil)
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "invalid"}}
-
-		GetTransaction(db)(c)
-
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-	})
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
+// TestUpdateTransaction tests the UpdateTransaction handler
 func TestUpdateTransaction(t *testing.T) {
-	t.Run("Success - partial update", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+	tests := []struct {
+		name           string
+		transactionID  string
+		requestBody    map[string]interface{}
+		setupMock      func(sqlmock.Sqlmock)
+		expectedStatus int
+		expectedBody   []string
+	}{
+		{
+			name:          "successful partial update",
+			transactionID: "tx1",
+			requestBody: map[string]interface{}{
+				"quantity": 15.0,
+				"notes":    "Updated notes",
+			},
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		// Mock transaction retrieval
-		mock.ExpectQuery(`SELECT .* FROM transactions WHERE id = \$1 AND user_id = \$2`).
-			WithArgs(1, 1).
-			WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "asset_id", "type", "quantity", "price"}).
-				AddRow(1, 1, 1, "BUY", 10, 100.00))
+				// Mock existing transaction query
+				mock.ExpectQuery("SELECT quantity, price, fees, notes, transaction_type FROM transactions WHERE id = \\$1 AND user_id = \\$2").
+					WithArgs("tx1", "user1").
+					WillReturnRows(sqlmock.NewRows([]string{"quantity", "price", "fees", "notes", "transaction_type"}).
+						AddRow(10.0, 150.0, 1.0, "Old notes", "BUY"))
 
-		// Mock update
-		mock.ExpectBegin()
-		mock.ExpectExec(`UPDATE transactions SET quantity = \$1, price = \$2 WHERE id = \$3`).
-			WithArgs(15, 100.00, 1).
-			WillReturnResult(sqlmock.NewResult(0, 1))
-		mock.ExpectCommit()
+				// Mock update query - new total: 15 * 150 + 1 = 2251
+				mock.ExpectExec("UPDATE transactions SET quantity = \\$1, price = \\$2, fees = \\$3, notes = \\$4, total_amount = \\$5 WHERE id = \\$6 AND user_id = \\$7").
+					WithArgs(15.0, 150.0, 1.0, "Updated notes", 2251.0, "tx1", "user1").
+					WillReturnResult(sqlmock.NewResult(1, 1))
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"Transaction updated successfully", "tx1"},
+		},
+		{
+			name:          "update all fields",
+			transactionID: "tx2",
+			requestBody: map[string]interface{}{
+				"quantity": 8.0,
+				"price":    200.0,
+				"fees":     2.0,
+				"notes":    "Fully updated transaction",
+			},
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("PATCH", "/transactions/1", strings.NewReader(`{
-			"quantity": 15
-		}`))
-		c.Request.Header.Set("Content-Type", "application/json")
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "1"}}
+				// Mock existing transaction query
+				mock.ExpectQuery("SELECT quantity, price, fees, notes, transaction_type FROM transactions WHERE id = \\$1 AND user_id = \\$2").
+					WithArgs("tx2", "user1").
+					WillReturnRows(sqlmock.NewRows([]string{"quantity", "price", "fees", "notes", "transaction_type"}).
+						AddRow(5.0, 160.0, 1.0, "Old notes", "SELL"))
 
-		UpdateTransaction(db)(c)
+				// Mock update query - new total for SELL: 8 * 200 - 2 = 1598
+				mock.ExpectExec("UPDATE transactions SET quantity = \\$1, price = \\$2, fees = \\$3, notes = \\$4, total_amount = \\$5 WHERE id = \\$6 AND user_id = \\$7").
+					WithArgs(8.0, 200.0, 2.0, "Fully updated transaction", 1598.0, "tx2", "user1").
+					WillReturnResult(sqlmock.NewResult(1, 1))
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"Transaction updated successfully", "tx2"},
+		},
+		{
+			name:          "transaction not found",
+			transactionID: "nonexistent",
+			requestBody: map[string]interface{}{
+				"quantity": 10.0,
+			},
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+				// Mock existing transaction query that returns no rows
+				mock.ExpectQuery("SELECT quantity, price, fees, notes, transaction_type FROM transactions WHERE id = \\$1 AND user_id = \\$2").
+					WithArgs("nonexistent", "user1").
+					WillReturnError(sql.ErrNoRows)
+			},
+			expectedStatus: http.StatusNotFound,
+			expectedBody:   []string{"Transaction not found"},
+		},
+		{
+			name:           "no fields provided for update",
+			transactionID:  "tx1",
+			requestBody:    map[string]interface{}{},
+			setupMock:      func(mock sqlmock.Sqlmock) {}, // No mock needed
+			expectedStatus: http.StatusBadRequest,
+			expectedBody:   []string{"At least one field must be provided for update"},
+		},
+	}
 
-	t.Run("Error - transaction not found", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			gin.SetMode(gin.TestMode)
+			logger, _ := zap.NewDevelopment()
 
-		mock.ExpectQuery(`SELECT .* FROM transactions WHERE id = \$1 AND user_id = \$2`).
-			WithArgs(999, 1).
-			WillReturnError(sql.ErrNoRows)
+			// Create mock database
+			db, mock, err := sqlmock.New()
+			assert.NoError(t, err)
+			defer db.Close()
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("PATCH", "/transactions/999", strings.NewReader(`{
-			"quantity": 15
-		}`))
-		c.Request.Header.Set("Content-Type", "application/json")
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "999"}}
+			mockServices := &services.Services{
+				DB:     db,
+				Logger: logger,
+			}
 
-		UpdateTransaction(db)(c)
+			handler := NewHandler(mockServices, logger)
 
-		assert.Equal(t, http.StatusNotFound, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			tt.setupMock(mock)
 
-	t.Run("Error - invalid quantity", func(t *testing.T) {
-		db, _, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+			router := gin.New()
+			router.PUT("/transactions/:id", handler.UpdateTransaction)
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("PATCH", "/transactions/1", strings.NewReader(`{
-			"quantity": -5
-		}`))
-		c.Request.Header.Set("Content-Type", "application/json")
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "1"}}
+			jsonBody, _ := json.Marshal(tt.requestBody)
+			req, _ := http.NewRequest("PUT", "/transactions/"+tt.transactionID, bytes.NewBuffer(jsonBody))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
 
-		UpdateTransaction(db)(c)
+			router.ServeHTTP(w, req)
 
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-	})
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			for _, expectedStr := range tt.expectedBody {
+				assert.Contains(t, w.Body.String(), expectedStr)
+			}
 
-	t.Run("Success - recalculate balance on price change", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
-
-		// Mock transaction retrieval
-		mock.ExpectQuery(`SELECT .* FROM transactions WHERE id = \$1 AND user_id = \$2`).
-			WithArgs(1, 1).
-			WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "asset_id", "type", "quantity", "price"}).
-				AddRow(1, 1, 1, "BUY", 10, 100.00))
-
-		// Mock balance adjustment
-		mock.ExpectBegin()
-		mock.ExpectExec(`UPDATE accounts SET balance = balance \+ \$1 WHERE user_id = \$2`).
-			WithArgs(100.00, 1). // 10 * (100 - 90)
-			WillReturnResult(sqlmock.NewResult(0, 1))
-		mock.ExpectExec(`UPDATE transactions SET price = \$1 WHERE id = \$2`).
-			WithArgs(90.00, 1).
-			WillReturnResult(sqlmock.NewResult(0, 1))
-		mock.ExpectCommit()
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("PATCH", "/transactions/1", strings.NewReader(`{
-			"price": 90.00
-		}`))
-		c.Request.Header.Set("Content-Type", "application/json")
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "1"}}
-
-		UpdateTransaction(db)(c)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("Error - unauthorized access", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
-
-		// Transaction exists but belongs to different user
-		mock.ExpectQuery(`SELECT .* FROM transactions WHERE id = \$1 AND user_id = \$2`).
-			WithArgs(1, 1).
-			WillReturnRows(sqlmock.NewRows([]string{"id", "user_id"}).
-				AddRow(1, 2))
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("PATCH", "/transactions/1", strings.NewReader(`{
-			"quantity": 15
-		}`))
-		c.Request.Header.Set("Content-Type", "application/json")
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "1"}}
-
-		UpdateTransaction(db)(c)
-
-		assert.Equal(t, http.StatusNotFound, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
+// TestDeleteTransaction tests the DeleteTransaction handler
 func TestDeleteTransaction(t *testing.T) {
-	t.Run("Success - delete transaction", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+	tests := []struct {
+		name           string
+		transactionID  string
+		setupMock      func(sqlmock.Sqlmock)
+		expectedStatus int
+		expectedBody   []string
+	}{
+		{
+			name:          "successful transaction deletion",
+			transactionID: "tx1",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		// Mock transaction retrieval
-		mock.ExpectQuery(`SELECT .* FROM transactions WHERE id = \$1 AND user_id = \$2`).
-			WithArgs(1, 1).
-			WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "asset_id", "type", "quantity", "price"}).
-				AddRow(1, 1, 1, "BUY", 10, 100.00))
+				// Mock transaction existence check query
+				mock.ExpectQuery("SELECT t.transaction_type, t.quantity, a.symbol FROM transactions t JOIN assets a ON t.asset_id = a.id WHERE t.id = \\$1 AND t.user_id = \\$2").
+					WithArgs("tx1", "user1").
+					WillReturnRows(sqlmock.NewRows([]string{"transaction_type", "quantity", "symbol"}).AddRow("BUY", 10.0, "AAPL"))
 
-		// Mock deletion
-		mock.ExpectBegin()
-		mock.ExpectExec(`DELETE FROM transactions WHERE id = \$1`).
-			WithArgs(1).
-			WillReturnResult(sqlmock.NewResult(0, 1))
-		// Mock balance adjustment for BUY transaction
-		mock.ExpectExec(`UPDATE accounts SET balance = balance \+ \$1 WHERE user_id = \$2`).
-			WithArgs(1000.00, 1). // 10 * 100.00
-			WillReturnResult(sqlmock.NewResult(0, 1))
-		mock.ExpectCommit()
+				// Mock delete query
+				mock.ExpectExec("DELETE FROM transactions WHERE id = \\$1 AND user_id = \\$2").
+					WithArgs("tx1", "user1").
+					WillReturnResult(sqlmock.NewResult(1, 1))
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"Transaction deleted successfully", "tx1"},
+		},
+		{
+			name:          "transaction not found",
+			transactionID: "nonexistent",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("DELETE", "/transactions/1", nil)
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "1"}}
+				// Mock transaction existence check query that returns no rows
+				mock.ExpectQuery("SELECT t.transaction_type, t.quantity, a.symbol FROM transactions t JOIN assets a ON t.asset_id = a.id WHERE t.id = \\$1 AND t.user_id = \\$2").
+					WithArgs("nonexistent", "user1").
+					WillReturnError(sql.ErrNoRows)
+			},
+			expectedStatus: http.StatusNotFound,
+			expectedBody:   []string{"Transaction not found"},
+		},
+		{
+			name:           "empty transaction ID",
+			transactionID:  "",
+			setupMock:      func(mock sqlmock.Sqlmock) {}, // No mock needed
+			expectedStatus: http.StatusNotFound,
+			expectedBody:   []string{"404 page not found"},
+		},
+	}
 
-		DeleteTransaction(db)(c)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			gin.SetMode(gin.TestMode)
+			logger, _ := zap.NewDevelopment()
 
-		assert.Equal(t, http.StatusNoContent, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			// Create mock database
+			db, mock, err := sqlmock.New()
+			assert.NoError(t, err)
+			defer db.Close()
 
-	t.Run("Error - transaction not found", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+			mockServices := &services.Services{
+				DB:     db,
+				Logger: logger,
+			}
 
-		mock.ExpectQuery(`SELECT .* FROM transactions WHERE id = \$1 AND user_id = \$2`).
-			WithArgs(999, 1).
-			WillReturnError(sql.ErrNoRows)
+			handler := NewHandler(mockServices, logger)
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("DELETE", "/transactions/999", nil)
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "999"}}
+			tt.setupMock(mock)
 
-		DeleteTransaction(db)(c)
+			router := gin.New()
+			router.DELETE("/transactions/:id", handler.DeleteTransaction)
 
-		assert.Equal(t, http.StatusNotFound, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			url := "/transactions/" + tt.transactionID
+			req, _ := http.NewRequest("DELETE", url, nil)
+			w := httptest.NewRecorder()
 
-	t.Run("Error - database failure", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+			router.ServeHTTP(w, req)
 
-		// Mock transaction retrieval
-		mock.ExpectQuery(`SELECT .* FROM transactions WHERE id = \$1 AND user_id = \$2`).
-			WithArgs(1, 1).
-			WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "asset_id", "type", "quantity", "price"}).
-				AddRow(1, 1, 1, "BUY", 10, 100.00))
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			for _, expectedStr := range tt.expectedBody {
+				assert.Contains(t, w.Body.String(), expectedStr)
+			}
 
-		// Mock failed deletion
-		mock.ExpectBegin()
-		mock.ExpectExec(`DELETE FROM transactions WHERE id = \$1`).
-			WithArgs(1).
-			WillReturnError(sql.ErrConnDone)
-		mock.ExpectRollback()
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("DELETE", "/transactions/1", nil)
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "1"}}
-
-		DeleteTransaction(db)(c)
-
-		assert.Equal(t, http.StatusInternalServerError, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
+// TestGetNotifications tests the GetNotifications handler
 func TestGetNotifications(t *testing.T) {
-	t.Run("Success - with pagination", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+	tests := []struct {
+		name           string
+		queryParams    string
+		setupMock      func(sqlmock.Sqlmock)
+		expectedStatus int
+		expectedBody   []string
+	}{
+		{
+			name:        "successful notifications listing",
+			queryParams: "?limit=10",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		rows := sqlmock.NewRows([]string{"id", "user_id", "type", "message", "is_read", "created_at"}).
-			AddRow(1, 1, "TRADE", "Your BUY order for AAPL was executed", false, "2025-01-01T00:00:00Z").
-			AddRow(2, 1, "SYSTEM", "System maintenance scheduled", false, "2025-01-02T00:00:00Z")
+				// Mock notifications query
+				rows := sqlmock.NewRows([]string{
+					"id", "title", "message", "notification_type", "is_read", "created_at",
+				}).
+					AddRow("notif1", "Price Alert", "AAPL reached target", "PRICE_ALERT", false, "2024-01-01").
+					AddRow("notif2", "Portfolio Update", "Holdings updated", "PORTFOLIO_UPDATE", true, "2024-01-02")
 
-		mock.ExpectQuery(`SELECT .* FROM notifications WHERE user_id = \$1 ORDER BY created_at DESC LIMIT \$2 OFFSET \$3`).
-			WithArgs(1, 10, 0).
-			WillReturnRows(rows)
+				mock.ExpectQuery("SELECT id, title, message, notification_type, is_read, created_at FROM notifications WHERE user_id = \\$1 ORDER BY created_at DESC LIMIT \\$2").
+					WithArgs("user1", "10").
+					WillReturnRows(rows)
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"notifications", "unread_count", "Price Alert", "Portfolio Update", "1"}, // 1 unread
+		},
+		{
+			name:        "unread notifications only",
+			queryParams: "?unread_only=true&limit=10",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/notifications?limit=10&offset=0", nil)
-		c.Set("userID", int64(1))
+				// Mock unread notifications query
+				rows := sqlmock.NewRows([]string{
+					"id", "title", "message", "notification_type", "is_read", "created_at",
+				}).
+					AddRow("notif1", "Price Alert", "AAPL reached target", "PRICE_ALERT", false, "2024-01-01")
 
-		GetNotifications(db)(c)
+				mock.ExpectQuery("SELECT id, title, message, notification_type, is_read, created_at FROM notifications WHERE user_id = \\$1 AND is_read = false ORDER BY created_at DESC LIMIT \\$2").
+					WithArgs("user1", "10").
+					WillReturnRows(rows)
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"notifications", "Price Alert", "unread_count", "1"},
+		},
+		{
+			name:        "empty notifications list",
+			queryParams: "?limit=10",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+				// Mock empty notifications query
+				rows := sqlmock.NewRows([]string{
+					"id", "title", "message", "notification_type", "is_read", "created_at",
+				})
 
-	t.Run("Success - filter by type", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+				mock.ExpectQuery("SELECT id, title, message, notification_type, is_read, created_at FROM notifications WHERE user_id = \\$1 ORDER BY created_at DESC LIMIT \\$2").
+					WithArgs("user1", "10").
+					WillReturnRows(rows)
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"notifications", "total", "unread_count", "0"},
+		},
+		{
+			name:        "all notifications without limit",
+			queryParams: "?limit=all",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		rows := sqlmock.NewRows([]string{"id", "user_id", "type", "message", "is_read", "created_at"}).
-			AddRow(1, 1, "TRADE", "Your BUY order for AAPL was executed", false, "2025-01-01T00:00:00Z")
+				// Mock notifications query without limit
+				rows := sqlmock.NewRows([]string{
+					"id", "title", "message", "notification_type", "is_read", "created_at",
+				}).
+					AddRow("notif1", "Alert 1", "Message 1", "PRICE_ALERT", false, "2024-01-01").
+					AddRow("notif2", "Alert 2", "Message 2", "PORTFOLIO_UPDATE", false, "2024-01-02")
 
-		mock.ExpectQuery(`SELECT .* FROM notifications WHERE user_id = \$1 AND type = \$2`).
-			WithArgs(1, "TRADE").
-			WillReturnRows(rows)
+				mock.ExpectQuery("SELECT id, title, message, notification_type, is_read, created_at FROM notifications WHERE user_id = \\$1 ORDER BY created_at DESC").
+					WithArgs("user1").
+					WillReturnRows(rows)
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"notifications", "Alert 1", "Alert 2", "unread_count", "2"},
+		},
+	}
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/notifications?type=TRADE", nil)
-		c.Set("userID", int64(1))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			gin.SetMode(gin.TestMode)
+			logger, _ := zap.NewDevelopment()
 
-		GetNotifications(db)(c)
+			// Create mock database
+			db, mock, err := sqlmock.New()
+			assert.NoError(t, err)
+			defer db.Close()
 
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			mockServices := &services.Services{
+				DB:     db,
+				Logger: logger,
+			}
 
-	t.Run("Error - invalid limit parameter", func(t *testing.T) {
-		db, _, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+			handler := NewHandler(mockServices, logger)
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/notifications?limit=invalid", nil)
-		c.Set("userID", int64(1))
+			tt.setupMock(mock)
 
-		GetNotifications(db)(c)
+			router := gin.New()
+			router.GET("/notifications", handler.GetNotifications)
 
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-	})
+			req, _ := http.NewRequest("GET", "/notifications"+tt.queryParams, nil)
+			w := httptest.NewRecorder()
 
-	t.Run("Error - database error", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+			router.ServeHTTP(w, req)
 
-		mock.ExpectQuery(`SELECT .* FROM notifications`).
-			WillReturnError(sql.ErrConnDone)
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			for _, expectedStr := range tt.expectedBody {
+				assert.Contains(t, w.Body.String(), expectedStr)
+			}
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/notifications", nil)
-		c.Set("userID", int64(1))
-
-		GetNotifications(db)(c)
-
-		assert.Equal(t, http.StatusInternalServerError, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
+func TestGetNotifications_NilDB(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	mockServices := &services.Services{
+		DB:     nil, // nil database
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	router := gin.New()
+	router.GET("/notifications", handler.GetNotifications)
+
+	req, _ := http.NewRequest("GET", "/notifications", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "Failed to fetch notifications")
+}
+
+// TestMarkNotificationRead tests the MarkNotificationRead handler
 func TestMarkNotificationRead(t *testing.T) {
-	t.Run("Success - mark notification as read", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+	tests := []struct {
+		name           string
+		notificationID string
+		setupMock      func(sqlmock.Sqlmock)
+		expectedStatus int
+		expectedBody   []string
+	}{
+		{
+			name:           "successful notification mark as read",
+			notificationID: "notif1",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		// Mock notification ownership check
-		mock.ExpectQuery(`SELECT user_id FROM notifications WHERE id = \$1`).
-			WithArgs(1).
-			WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(1))
+				// Mock notification check (unread)
+				mock.ExpectQuery("SELECT is_read FROM notifications WHERE id = \\$1 AND user_id = \\$2").
+					WithArgs("notif1", "user1").
+					WillReturnRows(sqlmock.NewRows([]string{"is_read"}).AddRow(false))
 
-		// Mock update
-		mock.ExpectExec(`UPDATE notifications SET is_read = true WHERE id = \$1`).
-			WithArgs(1).
-			WillReturnResult(sqlmock.NewResult(0, 1))
+				// Mock update query
+				mock.ExpectExec("UPDATE notifications SET is_read = true WHERE id = \\$1 AND user_id = \\$2").
+					WithArgs("notif1", "user1").
+					WillReturnResult(sqlmock.NewResult(1, 1))
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"Notification marked as read", "notif1"},
+		},
+		{
+			name:           "already read notification",
+			notificationID: "notif2",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("PATCH", "/notifications/1/read", nil)
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "1"}}
+				// Mock notification check (already read)
+				mock.ExpectQuery("SELECT is_read FROM notifications WHERE id = \\$1 AND user_id = \\$2").
+					WithArgs("notif2", "user1").
+					WillReturnRows(sqlmock.NewRows([]string{"is_read"}).AddRow(true))
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"Notification already marked as read", "notif2"},
+		},
+		{
+			name:           "notification not found",
+			notificationID: "nonexistent",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
 
-		MarkNotificationRead(db)(c)
+				// Mock notification check that returns no rows
+				mock.ExpectQuery("SELECT is_read FROM notifications WHERE id = \\$1 AND user_id = \\$2").
+					WithArgs("nonexistent", "user1").
+					WillReturnError(sql.ErrNoRows)
+			},
+			expectedStatus: http.StatusNotFound,
+			expectedBody:   []string{"Notification not found"},
+		},
+		{
+			name:           "empty notification ID",
+			notificationID: "",
+			setupMock:      func(mock sqlmock.Sqlmock) {}, // No mock needed
+			expectedStatus: http.StatusBadRequest,
+			expectedBody:   []string{"Notification ID is required"},
+		},
+	}
 
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			gin.SetMode(gin.TestMode)
+			logger, _ := zap.NewDevelopment()
 
-	t.Run("Error - notification not found", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+			// Create mock database
+			db, mock, err := sqlmock.New()
+			assert.NoError(t, err)
+			defer db.Close()
 
-		mock.ExpectQuery(`SELECT user_id FROM notifications WHERE id = \$1`).
-			WithArgs(999).
-			WillReturnError(sql.ErrNoRows)
+			mockServices := &services.Services{
+				DB:     db,
+				Logger: logger,
+			}
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("PATCH", "/notifications/999/read", nil)
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "999"}}
+			handler := NewHandler(mockServices, logger)
 
-		MarkNotificationRead(db)(c)
+			tt.setupMock(mock)
 
-		assert.Equal(t, http.StatusNotFound, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			router := gin.New()
+			router.PUT("/notifications/:id/read", handler.MarkNotificationRead)
 
-	t.Run("Error - unauthorized access", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+			url := "/notifications/" + tt.notificationID + "/read"
+			req, _ := http.NewRequest("PUT", url, nil)
+			w := httptest.NewRecorder()
 
-		// Notification belongs to different user
-		mock.ExpectQuery(`SELECT user_id FROM notifications WHERE id = \$1`).
-			WithArgs(1).
-			WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(2))
+			router.ServeHTTP(w, req)
 
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("PATCH", "/notifications/1/read", nil)
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "1"}}
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			for _, expectedStr := range tt.expectedBody {
+				assert.Contains(t, w.Body.String(), expectedStr)
+			}
 
-		MarkNotificationRead(db)(c)
-
-		assert.Equal(t, http.StatusNotFound, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("Error - database failure", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
-
-		mock.ExpectQuery(`SELECT user_id FROM notifications WHERE id = \$1`).
-			WithArgs(1).
-			WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(1))
-
-		mock.ExpectExec(`UPDATE notifications SET is_read = true WHERE id = \$1`).
-			WithArgs(1).
-			WillReturnError(sql.ErrConnDone)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("PATCH", "/notifications/1/read", nil)
-		c.Set("userID", int64(1))
-		c.Params = []gin.Param{{Key: "id", Value: "1"}}
-
-		MarkNotificationRead(db)(c)
-
-		assert.Equal(t, http.StatusInternalServerError, w.Code)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
+// TestUpdateNotificationSettings tests the UpdateNotificationSettings handler
+func TestUpdateNotificationSettings(t *testing.T) {
+	tests := []struct {
+		name           string
+		requestBody    map[string]interface{}
+		setupMock      func(sqlmock.Sqlmock)
+		expectedStatus int
+		expectedBody   []string
+	}{
+		{
+			name: "successful settings update",
+			requestBody: map[string]interface{}{
+				"price_alerts":        true,
+				"portfolio_updates":   true,
+				"market_news":         false,
+				"performance_reports": true,
+				"email_enabled":       true,
+				"sms_enabled":         false,
+				"web_push_enabled":    true,
+			},
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody: []string{
+				"Notification settings updated successfully",
+				"price_alerts", "portfolio_updates", "market_news",
+				"performance_reports", "email_enabled", "sms_enabled", "web_push_enabled",
+			},
+		},
+		{
+			name: "all settings disabled",
+			requestBody: map[string]interface{}{
+				"price_alerts":        false,
+				"portfolio_updates":   false,
+				"market_news":         false,
+				"performance_reports": false,
+				"email_enabled":       false,
+				"sms_enabled":         false,
+				"web_push_enabled":    false,
+			},
+			setupMock: func(mock sqlmock.Sqlmock) {
+				// Mock user ID query
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
+			},
+			expectedStatus: http.StatusOK,
+			expectedBody:   []string{"Notification settings updated successfully", "settings"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			gin.SetMode(gin.TestMode)
+			logger, _ := zap.NewDevelopment()
+
+			// Create mock database
+			db, mock, err := sqlmock.New()
+			assert.NoError(t, err)
+			defer db.Close()
+
+			mockServices := &services.Services{
+				DB:     db,
+				Logger: logger,
+			}
+
+			handler := NewHandler(mockServices, logger)
+
+			tt.setupMock(mock)
+
+			router := gin.New()
+			router.PUT("/settings/notifications", handler.UpdateNotificationSettings)
+
+			jsonBody, _ := json.Marshal(tt.requestBody)
+			req, _ := http.NewRequest("PUT", "/settings/notifications", bytes.NewBuffer(jsonBody))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			router.ServeHTTP(w, req)
+
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			for _, expectedStr := range tt.expectedBody {
+				assert.Contains(t, w.Body.String(), expectedStr)
+			}
+
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestUpdateNotificationSettings_ValidationError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	mockServices := &services.Services{
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	router := gin.New()
+	router.PUT("/settings/notifications", handler.UpdateNotificationSettings)
+
+	// Invalid JSON body
+	req, _ := http.NewRequest("PUT", "/settings/notifications", bytes.NewBuffer([]byte("invalid json")))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "error")
+}
+
+// TestWebSocketHandler tests the WebSocketHandler
+func TestWebSocketHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	mockServices := &services.Services{
+		Logger: logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	router := gin.New()
+	router.GET("/ws", handler.WebSocketHandler)
+
+	req, _ := http.NewRequest("GET", "/ws", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "WebSocket real-time updates")
+	assert.Contains(t, w.Body.String(), "Available")
+	assert.Contains(t, w.Body.String(), "Real-time portfolio value updates")
+	assert.Contains(t, w.Body.String(), "ws://localhost:8080/api/v1/ws")
+}
+
+// TestUtilityFunctions tests the utility helper functions
 func TestGetAssetIDBySymbol(t *testing.T) {
-	t.Run("Success - get asset ID", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+	tests := []struct {
+		name          string
+		symbol        string
+		setupMock     func(sqlmock.Sqlmock)
+		expectedError bool
+		expectedID    string
+	}{
+		{
+			name:   "existing asset",
+			symbol: "AAPL",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SELECT id FROM assets WHERE symbol = \\$1").
+					WithArgs("AAPL").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("asset1"))
+			},
+			expectedError: false,
+			expectedID:    "asset1",
+		},
+		{
+			name:   "non-existent asset",
+			symbol: "UNKNOWN",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SELECT id FROM assets WHERE symbol = \\$1").
+					WithArgs("UNKNOWN").
+					WillReturnError(sql.ErrNoRows)
+			},
+			expectedError: true,
+		},
+	}
 
-		mock.ExpectQuery(`SELECT id FROM assets WHERE symbol = \$1`).
-			WithArgs("AAPL").
-			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			gin.SetMode(gin.TestMode)
+			logger, _ := zap.NewDevelopment()
 
-		assetID, err := getAssetIDBySymbol(db, "AAPL")
+			// Create mock database
+			db, mock, err := sqlmock.New()
+			assert.NoError(t, err)
+			defer db.Close()
 
-		assert.Equal(t, int64(1), assetID)
-		assert.NoError(t, err)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			mockServices := &services.Services{
+				DB:     db,
+				Logger: logger,
+			}
 
-	t.Run("Error - asset not found", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
+			handler := NewHandler(mockServices, logger)
 
-		mock.ExpectQuery(`SELECT id FROM assets WHERE symbol = \$1`).
-			WithArgs("UNKNOWN").
-			WillReturnError(sql.ErrNoRows)
+			tt.setupMock(mock)
 
-		assetID, err := getAssetIDBySymbol(db, "UNKNOWN")
+			assetID, err := handler.getAssetIDBySymbol(tt.symbol)
 
-		assert.Equal(t, int64(0), assetID)
-		assert.Error(t, err)
-		assert.Equal(t, sql.ErrNoRows, err)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedID, assetID)
+			}
 
-	t.Run("Error - database failure", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		if err != nil {
-			t.Fatalf("Error creating mock DB: %v", err)
-		}
-		defer db.Close()
-
-		mock.ExpectQuery(`SELECT id FROM assets WHERE symbol = \$1`).
-			WithArgs("AAPL").
-			WillReturnError(sql.ErrConnDone)
-
-		assetID, err := getAssetIDBySymbol(db, "AAPL")
-
-		assert.Equal(t, int64(0), assetID)
-		assert.Error(t, err)
-		assert.Equal(t, sql.ErrConnDone, err)
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestGetUserID(t *testing.T) {
-	t.Run("Success - get user ID from context", func(t *testing.T) {
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Set("userID", int64(1))
+	tests := []struct {
+		name          string
+		username      string
+		setupMock     func(sqlmock.Sqlmock)
+		expectedError bool
+		expectedID    string
+	}{
+		{
+			name:     "existing user",
+			username: "default_user",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("default_user").
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user1"))
+			},
+			expectedError: false,
+			expectedID:    "user1",
+		},
+		{
+			name:     "non-existent user",
+			username: "unknown_user",
+			setupMock: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SELECT id FROM users WHERE username = \\$1").
+					WithArgs("unknown_user").
+					WillReturnError(sql.ErrNoRows)
+			},
+			expectedError: true,
+		},
+	}
 
-		userID, err := getUserID(c)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			gin.SetMode(gin.TestMode)
+			logger, _ := zap.NewDevelopment()
 
-		assert.Equal(t, int64(1), userID)
-		assert.NoError(t, err)
-	})
+			// Create mock database
+			db, mock, err := sqlmock.New()
+			assert.NoError(t, err)
+			defer db.Close()
 
-	t.Run("Error - user ID not set", func(t *testing.T) {
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			mockServices := &services.Services{
+				DB:     db,
+				Logger: logger,
+			}
 
-		userID, err := getUserID(c)
+			handler := NewHandler(mockServices, logger)
 
-		assert.Equal(t, int64(0), userID)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "user ID not found")
-	})
+			tt.setupMock(mock)
 
-	t.Run("Error - invalid user ID type", func(t *testing.T) {
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Set("userID", "invalid")
+			userID, err := handler.getUserID(tt.username)
 
-		userID, err := getUserID(c)
+			if tt.expectedError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedID, userID)
+			}
 
-		assert.Equal(t, int64(0), userID)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid user ID type")
-	})
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
