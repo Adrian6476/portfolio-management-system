@@ -1,8 +1,10 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, ReactNode } from 'react'
 import DashboardLayout from '../components/DashboardLayout'
 import PortfolioSummary from '../components/PortfolioSummary'
+import AddHoldingForm from '../components/AddHoldingForm'
+import PortfolioChart from '../components/PortfolioChart'
 
 import dynamic from 'next/dynamic';
 
@@ -17,38 +19,6 @@ const HoldingsTable = dynamic(
     ssr: false
   }
 );
-
-function HoldingsTablePlaceholder() {
-  return (
-    <div className="bank-card min-h-[400px]">
-      <HoldingsTable />
-    </div>
-  );
-}
-
-function AddHoldingFormPlaceholder() {
-  return (
-    <div className="bank-card min-h-[300px] flex items-center justify-center">
-      <div className="text-center">
-        <h3 className="text-lg font-semibold text-gray-900 mb-2">Add Holding Form</h3>
-        <p className="text-gray-500">Developer C will implement this component</p>
-        <div className="text-xs text-gray-400 mt-2">API: POST /api/v1/portfolio/holdings</div>
-      </div>
-    </div>
-  )
-}
-
-function PortfolioChartPlaceholder() {
-  return (
-    <div className="bank-card min-h-[300px] flex items-center justify-center">
-      <div className="text-center">
-        <h3 className="text-lg font-semibold text-gray-900 mb-2">Portfolio Chart</h3>
-        <p className="text-gray-500">Developer C will implement this component</p>
-        <div className="text-xs text-gray-400 mt-2">Uses Recharts for asset allocation visualization</div>
-      </div>
-    </div>
-  )
-}
 
 export default function HomePage() {
   const [mounted, setMounted] = useState(false)
@@ -66,33 +36,23 @@ export default function HomePage() {
     )
   }
 
-  const renderContent = () => {
+  const renderContent = (): ReactNode => {
     switch (activeView) {
       case 'overview':
         return (
           <div className="space-y-6">
-            {/* Portfolio Summary - Full Width */}
             <PortfolioSummary />
-            
-            {/* Holdings Table - Full Width */}
-            <HoldingsTablePlaceholder />
+            <HoldingsTable />
           </div>
         )
       
       case 'manage':
-        return (
-          <div className="space-y-6">
-            {/* Holdings Management Focus */}
-            <HoldingsTablePlaceholder />
-          </div>
-        )
+        return <HoldingsTable />
       
       case 'add':
         return (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Add Form */}
-            <AddHoldingFormPlaceholder />
-            {/* Portfolio Summary for context */}
+            <AddHoldingForm />
             <PortfolioSummary />
           </div>
         )
@@ -100,9 +60,7 @@ export default function HomePage() {
       case 'analytics':
         return (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Chart gets more space */}
-            <PortfolioChartPlaceholder />
-            {/* Summary for context */}
+            <PortfolioChart />
             <PortfolioSummary />
           </div>
         )
@@ -117,7 +75,6 @@ export default function HomePage() {
       <div className="space-y-6">
         {renderContent()}
         
-        {/* Development Status - Only show in overview */}
         {activeView === 'overview' && (
           <div className="bank-card">
             <h3 className="text-lg font-semibold text-gray-900 mb-4">Development Status</h3>
@@ -143,10 +100,10 @@ export default function HomePage() {
               <div className="p-4 bg-purple-50 rounded-lg border border-purple-200">
                 <h4 className="font-medium text-purple-900 mb-2">Developer C Tasks</h4>
                 <ul className="text-sm text-purple-700 space-y-1">
-                  <li>⏳ Add holding form with validation</li>
-                  <li>⏳ Portfolio allocation chart</li>
-                  <li>⏳ Form integration with API</li>
-                  <li>⏳ Chart responsiveness</li>
+                  <li>✅ Add holding form with validation</li>
+                  <li>✅ Portfolio allocation chart</li>
+                  <li>✅ Form integration with API</li>
+                  <li>✅ Chart responsiveness</li>
                 </ul>
               </div>
             </div>
