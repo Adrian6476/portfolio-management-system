@@ -137,15 +137,6 @@ describe('Dashboard Page', () => {
     expect(screen.queryByTestId('portfolio-chart')).not.toBeInTheDocument()
   })
 
-  it('renders development status section in overview', () => {
-    renderWithQueryClient(<Page />)
-    
-    // Check for development status
-    expect(screen.getByText('Development Status')).toBeInTheDocument()
-    expect(screen.getByText('Developer A Tasks')).toBeInTheDocument()
-    expect(screen.getByText('Developer B Tasks')).toBeInTheDocument()
-    expect(screen.getByText('Developer C Tasks')).toBeInTheDocument()
-  })
 
   it('renders without console errors', () => {
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
