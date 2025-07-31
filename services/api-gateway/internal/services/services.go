@@ -13,11 +13,13 @@ import (
 )
 
 type Services struct {
-	DB      *sql.DB
-	Redis   *redis.Client
-	NATS    *nats.Conn
-	Finnhub *FinnhubClient
-	Logger  *zap.Logger
+	DB            *sql.DB
+	Redis         *redis.Client
+	NATS          *nats.Conn
+	Finnhub       *FinnhubClient
+	WebSocket     *WebSocketHub
+	MarketUpdater *MarketUpdater
+	Logger        *zap.Logger
 }
 
 func NewServices(cfg *config.Config, logger *zap.Logger) (*Services, error) {
@@ -58,6 +60,16 @@ func NewServices(cfg *config.Config, logger *zap.Logger) (*Services, error) {
 		logger.Warn("Finnhub API key not provided, market data features will be limited")
 	}
 
+	// Initialize WebSocket hub
+	services.WebSocket = NewWebSocketHub(logger)
+	go services.WebSocket.Run() // Start the WebSocket hub in a goroutine
+	logger.Info("WebSocket hub initialized and started")
+
+	// Initialize and start MarketUpdater
+	services.MarketUpdater = NewMarketUpdater(services.DB, services.Finnhub, services.WebSocket, logger)
+	go services.MarketUpdater.Start() // Start the market updater in a goroutine
+	logger.Info("Market updater initialized and started")
+
 	logger.Info("All services initialized successfully")
 	return services, nil
 }
@@ -79,6 +91,10 @@ func (s *Services) Close() error {
 
 	if s.NATS != nil {
 		s.NATS.Close()
+	}
+
+	if s.MarketUpdater != nil {
+		s.MarketUpdater.Stop()
 	}
 
 	if len(errs) > 0 {

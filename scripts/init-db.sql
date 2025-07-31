@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS market_data (
     market_cap DECIMAL(30, 2),
     change_24h DECIMAL(10, 4),
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    data_source VARCHAR(50) DEFAULT 'yahoo_finance'
+    data_source VARCHAR(50) DEFAULT 'finnhub',
+    UNIQUE(asset_id)
 );
 
 -- Historical prices table for time-series data

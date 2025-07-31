@@ -105,11 +105,11 @@
   }
 
   .bank-card {
-    @apply p-8 rounded-2xl bg-white shadow-lg border border-gray-100 hover:shadow-xl transition-all duration-300;
+    @apply px-12 py-8 rounded-2xl bg-white shadow-lg border border-gray-100 hover:shadow-xl transition-all duration-300;
   }
 
   .bank-sidebar {
-    @apply bg-slate-900 text-white min-h-screen w-20 flex flex-col items-center py-8;
+    @apply bg-slate-900 text-white h-screen w-20 flex flex-col items-center py-8 fixed top-0 left-0;
   }
 
   .bank-nav-item {
@@ -121,7 +121,7 @@
   }
 
   .bank-main-content {
-    @apply flex-1 bg-gray-50 p-8;
+    @apply flex-1 bg-gray-50 px-12 py-8;
   }
 
   .metric-value {

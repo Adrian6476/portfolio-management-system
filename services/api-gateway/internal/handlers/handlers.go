@@ -8,10 +8,19 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
 	"github.com/portfolio-management/api-gateway/internal/services"
 )
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		// Allow connections from any origin in development
+		return true
+	},
+}
 
 type Handler struct {
 	services *services.Services
@@ -221,11 +230,56 @@ func (h *Handler) GetPortfolioSummary(c *gin.Context) {
 		})
 	}
 
+	// Calculate portfolio daily change using real-time prices
+	var totalMarketValue float64
+	var totalDailyChange float64
+	var portfolioDailyChangePercent float64
+
+	if h.services.Finnhub != nil {
+		for _, holding := range topHoldings {
+			symbol := holding["symbol"].(string)
+			quantity := holding["quantity"].(float64)
+
+			if quote, priceErr := h.services.Finnhub.GetQuote(symbol); priceErr == nil {
+				currentPrice := quote.CurrentPrice
+				dailyChange := quote.Change
+
+				// Add to portfolio totals
+				holdingMarketValue := quantity * currentPrice
+				holdingDailyChange := quantity * dailyChange
+
+				totalMarketValue += holdingMarketValue
+				totalDailyChange += holdingDailyChange
+			} else {
+				// Fallback to cost basis if price unavailable
+				totalMarketValue += holding["total_value"].(float64)
+			}
+		}
+
+		// Calculate portfolio daily change percentage
+		if totalMarketValue > 0 {
+			portfolioDailyChangePercent = (totalDailyChange / (totalMarketValue - totalDailyChange)) * 100
+		}
+	} else {
+		// Finnhub not available, use cost basis
+		totalMarketValue = totalCost
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"summary": map[string]interface{}{
-			"total_holdings": totalHoldings,
-			"total_cost":     totalCost,
-			"total_shares":   totalShares,
+			"total_holdings":       totalHoldings,
+			"total_cost":           totalCost,
+			"total_shares":         totalShares,
+			"total_market_value":   totalMarketValue,
+			"daily_change":         totalDailyChange,
+			"daily_change_percent": portfolioDailyChangePercent,
+			"unrealized_gain_loss": totalMarketValue - totalCost,
+			"unrealized_gain_loss_percent": func() float64 {
+				if totalCost > 0 {
+					return ((totalMarketValue - totalCost) / totalCost) * 100
+				}
+				return 0.0
+			}(),
 		},
 		"asset_allocation": allocations,
 		"top_holdings":     topHoldings,
@@ -569,6 +623,10 @@ func (h *Handler) AddHolding(c *gin.Context) {
 		"quantity":     request.Quantity,
 		"average_cost": request.AverageCost,
 	})
+
+	// Broadcast portfolio update and price update via WebSocket
+	go h.broadcastPortfolioUpdate("default_user")
+	go h.broadcastPriceUpdate(request.Symbol)
 }
 
 func (h *Handler) UpdateHolding(c *gin.Context) {
@@ -655,6 +713,10 @@ func (h *Handler) UpdateHolding(c *gin.Context) {
 		"quantity":     newQuantity,
 		"average_cost": newCost,
 	})
+
+	// Broadcast portfolio update and price update via WebSocket
+	go h.broadcastPortfolioUpdate("default_user")
+	go h.broadcastPriceUpdate(assetSymbol)
 }
 
 func (h *Handler) RemoveHolding(c *gin.Context) {
@@ -726,6 +788,9 @@ func (h *Handler) RemoveHolding(c *gin.Context) {
 		"symbol":   assetSymbol,
 		"quantity": quantity,
 	})
+
+	// Broadcast portfolio update via WebSocket
+	go h.broadcastPortfolioUpdate("default_user")
 }
 
 // Market data handlers
@@ -2113,23 +2178,43 @@ func (h *Handler) UpdateNotificationSettings(c *gin.Context) {
 
 // WebSocket handler for real-time updates
 func (h *Handler) WebSocketHandler(c *gin.Context) {
-	// For now, return a JSON response indicating WebSocket support is coming
-	// In a full implementation, this would upgrade the HTTP connection to WebSocket
-	// and handle real-time portfolio updates, price changes, notifications, etc.
+	// Check if WebSocket service is available
+	if h.services.WebSocket == nil {
+		h.logger.Error("WebSocket service not available")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "WebSocket service not available"})
+		return
+	}
 
-	c.Header("Content-Type", "application/json")
-	c.JSON(http.StatusOK, gin.H{
-		"message": "WebSocket real-time updates",
-		"status":  "Available",
-		"features": []string{
-			"Real-time portfolio value updates",
-			"Live price feeds",
-			"Instant notifications",
-			"Market alerts",
-		},
-		"usage": "Connect to ws://localhost:8080/api/v1/ws for real-time updates",
-		"note":  "WebSocket implementation requires gorilla/websocket dependency",
-	})
+	// Upgrade HTTP connection to WebSocket
+	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		h.logger.Error("Failed to upgrade WebSocket connection", zap.Error(err))
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to upgrade to WebSocket"})
+		return
+	}
+
+	// Create client ID
+	clientID := uuid.New().String()
+
+	// Get user ID (in a real app, this would come from authentication)
+	userID := "default_user" // For demo purposes
+
+	// Create new client
+	client := &services.Client{
+		ID:            clientID,
+		Conn:          conn,
+		Send:          make(chan []byte, 256),
+		Hub:           h.services.WebSocket,
+		UserID:        userID,
+		Subscriptions: make(map[string]bool),
+	}
+
+	// Register client with hub
+	client.Hub.Register <- client
+
+	// Start goroutines for reading and writing
+	go client.WritePump()
+	go client.ReadPump()
 }
 
 // Transaction handlers
@@ -2431,6 +2516,161 @@ func (h *Handler) CreateTransaction(c *gin.Context) {
 		"price":          request.Price,
 		"total_amount":   totalAmount,
 	})
+
+	// Broadcast portfolio update via WebSocket after successful transaction
+	go h.broadcastPortfolioUpdate("default_user")
+}
+
+// Helper function to calculate and broadcast portfolio updates
+func (h *Handler) broadcastPortfolioUpdate(username string) {
+	if h.services.WebSocket == nil {
+		return
+	}
+
+	// Get user ID
+	var userID string
+	err := h.services.DB.QueryRow("SELECT id FROM users WHERE username = $1", username).Scan(&userID)
+	if err != nil {
+		h.logger.Error("Failed to get user ID for WebSocket broadcast", zap.Error(err))
+		return
+	}
+
+	// Calculate portfolio summary
+	portfolioSummary := h.calculatePortfolioSummary(userID)
+	if portfolioSummary == nil {
+		return
+	}
+
+	// Broadcast portfolio update
+	update := services.PortfolioUpdate{
+		TotalValue:                portfolioSummary["total_value"].(float64),
+		DailyChange:               portfolioSummary["daily_change"].(float64),
+		DailyChangePercent:        portfolioSummary["daily_change_percent"].(float64),
+		UnrealizedGainLoss:        portfolioSummary["unrealized_gain_loss"].(float64),
+		UnrealizedGainLossPercent: portfolioSummary["unrealized_gain_loss_percent"].(float64),
+	}
+
+	h.services.WebSocket.BroadcastPortfolioUpdate(update)
+	h.logger.Info("Broadcasted portfolio update via WebSocket",
+		zap.String("user", username),
+		zap.Float64("total_value", update.TotalValue))
+}
+
+// Helper function to calculate portfolio summary for WebSocket broadcasting
+func (h *Handler) calculatePortfolioSummary(userID string) map[string]interface{} {
+	query := `
+		SELECT
+			ph.id,
+			a.symbol,
+			a.name,
+			ph.quantity,
+			ph.average_cost,
+			ph.purchase_date
+		FROM portfolio_holdings ph
+		JOIN assets a ON ph.asset_id = a.id
+		WHERE ph.user_id = $1
+		ORDER BY ph.created_at DESC
+	`
+
+	rows, err := h.services.DB.Query(query, userID)
+	if err != nil {
+		h.logger.Error("Failed to query portfolio for WebSocket", zap.Error(err))
+		return nil
+	}
+	defer rows.Close()
+
+	var totalValue, totalCost, totalGainLoss float64
+	holdingCount := 0
+
+	for rows.Next() {
+		var id, symbol, name, purchaseDate string
+		var quantity, averageCost float64
+
+		err := rows.Scan(&id, &symbol, &name, &quantity, &averageCost, &purchaseDate)
+		if err != nil {
+			h.logger.Error("Failed to scan portfolio row for WebSocket", zap.Error(err))
+			continue
+		}
+
+		holdingCount++
+		costBasis := quantity * averageCost
+		totalCost += costBasis
+
+		// Get current price from Finnhub
+		currentPrice := averageCost // fallback to average cost
+		if h.services.Finnhub != nil {
+			if quote, priceErr := h.services.Finnhub.GetQuote(symbol); priceErr == nil {
+				currentPrice = quote.CurrentPrice
+			}
+		}
+
+		currentValue := quantity * currentPrice
+		totalValue += currentValue
+		totalGainLoss += (currentValue - costBasis)
+	}
+
+	if holdingCount == 0 {
+		return map[string]interface{}{
+			"total_value":                  0.0,
+			"total_cost":                   0.0,
+			"daily_change":                 0.0,
+			"daily_change_percent":         0.0,
+			"unrealized_gain_loss":         0.0,
+			"unrealized_gain_loss_percent": 0.0,
+		}
+	}
+
+	// Calculate percentages
+	dailyChangePercent := 0.0
+	unrealizedGainLossPercent := 0.0
+	if totalCost > 0 {
+		unrealizedGainLossPercent = (totalGainLoss / totalCost) * 100
+	}
+
+	// For daily change, we'll use a simplified calculation
+	// In a real implementation, you'd compare with previous day's closing values
+	dailyChange := totalGainLoss * 0.1 // Simplified daily change estimation
+
+	if totalValue > 0 {
+		dailyChangePercent = (dailyChange / totalValue) * 100
+	}
+
+	return map[string]interface{}{
+		"total_value":                  totalValue,
+		"total_cost":                   totalCost,
+		"daily_change":                 dailyChange,
+		"daily_change_percent":         dailyChangePercent,
+		"unrealized_gain_loss":         totalGainLoss,
+		"unrealized_gain_loss_percent": unrealizedGainLossPercent,
+	}
+}
+
+// Helper function to broadcast price updates for specific symbols
+func (h *Handler) broadcastPriceUpdate(symbol string) {
+	if h.services.WebSocket == nil || h.services.Finnhub == nil {
+		return
+	}
+
+	quote, err := h.services.Finnhub.GetQuote(symbol)
+	if err != nil {
+		h.logger.Error("Failed to get quote for WebSocket broadcast",
+			zap.String("symbol", symbol), zap.Error(err))
+		return
+	}
+
+	update := services.PriceUpdate{
+		Symbol:        symbol,
+		CurrentPrice:  quote.CurrentPrice,
+		Change:        quote.Change,
+		ChangePercent: quote.PercentChange,
+		High:          quote.HighPriceOfDay,
+		Low:           quote.LowPriceOfDay,
+	}
+
+	h.services.WebSocket.BroadcastPriceUpdate(update)
+	h.logger.Info("Broadcasted price update via WebSocket",
+		zap.String("symbol", symbol),
+		zap.Float64("price", update.CurrentPrice))
 }
 
 func (h *Handler) GetTransaction(c *gin.Context) {

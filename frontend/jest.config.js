@@ -13,6 +13,8 @@ const customJestConfig = {
   moduleNameMapper: {
     // Handle module aliases
     '^@/(.*)$': '<rootDir>/src/$1',
+    // Mock Next.js navigation
+    '^next/navigation$': '<rootDir>/__mocks__/next/navigation.js',
   },
   collectCoverageFrom: [
     'src/**/*.{js,jsx,ts,tsx}',

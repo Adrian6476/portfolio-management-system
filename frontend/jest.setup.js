@@ -49,6 +49,26 @@ Object.defineProperty(window, 'matchMedia', {
   })),
 })
 
+// Mock WebSocket for tests
+class MockWebSocket {
+  constructor(url) {
+    this.url = url
+    this.readyState = 1
+    this.send = jest.fn()
+    this.close = jest.fn()
+    this.addEventListener = jest.fn()
+    this.removeEventListener = jest.fn()
+    this.onopen = null
+    this.onmessage = null
+    this.onerror = null
+    this.onclose = null
+    setTimeout(() => {
+      if (this.onopen) this.onopen()
+    }, 10)
+  }
+}
+global.WebSocket = MockWebSocket
+
 // Suppress console errors during tests (optional)
 const originalError = console.error
 beforeAll(() => {

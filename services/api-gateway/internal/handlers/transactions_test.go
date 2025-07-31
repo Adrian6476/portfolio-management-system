@@ -736,8 +736,15 @@ func TestWebSocketHandler_Success(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	logger, _ := zap.NewDevelopment()
 
+	// Create mock WebSocket hub
+	hub := &services.WebSocketHub{
+		Register:   make(chan *services.Client, 1),
+		Unregister: make(chan *services.Client, 1),
+	}
+
 	mockServices := &services.Services{
-		Logger: logger,
+		WebSocket: hub,
+		Logger:    logger,
 	}
 
 	handler := NewHandler(mockServices, logger)
@@ -745,16 +752,41 @@ func TestWebSocketHandler_Success(t *testing.T) {
 	router := gin.New()
 	router.GET("/ws", handler.WebSocketHandler)
 
+	// Test with a regular HTTP request (should fail to upgrade)
 	req, _ := http.NewRequest("GET", "/ws", nil)
 	w := httptest.NewRecorder()
 
 	router.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "WebSocket real-time updates")
-	assert.Contains(t, w.Body.String(), "Available")
-	assert.Contains(t, w.Body.String(), "Real-time portfolio value updates")
-	assert.Contains(t, w.Body.String(), "ws://localhost:8080/api/v1/ws")
+	// Should return 400 because it's not a WebSocket upgrade request
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "Failed to upgrade to WebSocket")
+}
+
+// TestWebSocketHandler_MissingService tests WebSocket handler without WebSocket service
+func TestWebSocketHandler_MissingService(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger, _ := zap.NewDevelopment()
+
+	mockServices := &services.Services{
+		WebSocket: nil, // No WebSocket service
+		Logger:    logger,
+	}
+
+	handler := NewHandler(mockServices, logger)
+
+	router := gin.New()
+	router.GET("/ws", handler.WebSocketHandler)
+
+	// Test with a regular HTTP request (no upgrade headers)
+	req, _ := http.NewRequest("GET", "/ws", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	// Should return 400 because WebSocket service is nil
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "WebSocket service not available")
 }
 
 // TestUtilityFunctions tests the utility helper functions
@@ -1600,8 +1632,15 @@ func TestWebSocketHandler(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	logger, _ := zap.NewDevelopment()
 
+	// Create mock WebSocket hub
+	hub := &services.WebSocketHub{
+		Register:   make(chan *services.Client, 1),
+		Unregister: make(chan *services.Client, 1),
+	}
+
 	mockServices := &services.Services{
-		Logger: logger,
+		WebSocket: hub,
+		Logger:    logger,
 	}
 
 	handler := NewHandler(mockServices, logger)
@@ -1614,11 +1653,9 @@ func TestWebSocketHandler(t *testing.T) {
 
 	router.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "WebSocket real-time updates")
-	assert.Contains(t, w.Body.String(), "Available")
-	assert.Contains(t, w.Body.String(), "Real-time portfolio value updates")
-	assert.Contains(t, w.Body.String(), "ws://localhost:8080/api/v1/ws")
+	// Should return 400 because it's not a WebSocket upgrade request
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "Failed to upgrade to WebSocket")
 }
 
 // TestUtilityFunctions tests the utility helper functions
