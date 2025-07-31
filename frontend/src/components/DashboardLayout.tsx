@@ -1,16 +1,22 @@
 'use client'
 
-import React from 'react';
-import { 
-  BarChart3, 
+import React, { useState } from 'react';
+import {
+  BarChart3,
   Table,
   Plus,
   PieChart,
   Settings,
   RefreshCw,
   DollarSign,
-  TrendingUp
+  TrendingUp,
+  Wifi,
+  WifiOff
 } from 'lucide-react';
+import NotificationCenter from './NotificationCenter';
+import ExportModal from './ExportModal';
+import { usePortfolioSummary, formatCurrency, formatPercentage } from '@/hooks/usePortfolioSummary';
+import { usePortfolioWebSocket } from '@/hooks/useWebSocket';
 
 interface DashboardLayoutProps {
   children: React.ReactNode;
@@ -19,6 +25,10 @@ interface DashboardLayoutProps {
 }
 
 export default function DashboardLayout({ children, activeView, setActiveView }: DashboardLayoutProps) {
+  const { data: portfolioData, isLoading: portfolioLoading } = usePortfolioSummary();
+  const webSocket = usePortfolioWebSocket();
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  
   const getCurrentDate = () => {
     return new Date().toLocaleDateString('en-US', { 
       weekday: 'long', 
@@ -87,7 +97,7 @@ export default function DashboardLayout({ children, activeView, setActiveView }:
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col">
+      <main className="flex-1 flex flex-col ml-20">
         {/* Header */}
         <header className="bank-header">
           <div className="flex items-center space-x-6">
@@ -102,31 +112,65 @@ export default function DashboardLayout({ children, activeView, setActiveView }:
             <div className="hidden md:flex items-center space-x-6 px-4 py-2 bg-gray-50 rounded-lg">
               <div className="text-center">
                 <div className="text-sm font-medium text-gray-900">Total Value</div>
-                <div className="text-lg font-bold text-green-600">$--,---</div>
+                <div className="text-lg font-bold text-green-600">
+                  {portfolioLoading ? (
+                    <div className="animate-pulse bg-gray-200 h-6 w-20 rounded"></div>
+                  ) : portfolioData ? (
+                    formatCurrency(portfolioData.summary.total_market_value || portfolioData.summary.total_cost)
+                  ) : (
+                    '--'
+                  )}
+                </div>
               </div>
               <div className="text-center">
                 <div className="text-sm font-medium text-gray-900">Today</div>
-                <div className="text-lg font-bold text-gray-600">--%</div>
+                <div className="text-lg font-bold">
+                  {portfolioLoading ? (
+                    <div className="animate-pulse bg-gray-200 h-6 w-12 rounded"></div>
+                  ) : portfolioData?.summary.daily_change_percent !== undefined ? (
+                    <span className={`${
+                      portfolioData.summary.daily_change_percent >= 0 
+                        ? 'text-green-600' 
+                        : 'text-red-600'
+                    }`}>
+                      {formatPercentage(portfolioData.summary.daily_change_percent)}
+                    </span>
+                  ) : (
+                    <span className="text-gray-400">--</span>
+                  )}
+                </div>
               </div>
             </div>
             
             {/* Action Buttons */}
             <div className="flex items-center space-x-3">
-              <button 
-                className="p-2 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"
-                title="Refresh Data"
+              {/* WebSocket Status Indicator */}
+              <div 
+                className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                  webSocket.isConnected 
+                    ? 'bg-green-100 text-green-700' 
+                    : 'bg-gray-100 text-gray-600'
+                }`}
+                title={`WebSocket ${webSocket.connectionStatus}`}
               >
-                <RefreshCw className="w-4 h-4 text-gray-600" />
-              </button>
+                {webSocket.isConnected ? (
+                  <Wifi className="w-3 h-3" />
+                ) : (
+                  <WifiOff className="w-3 h-3" />
+                )}
+                <span>
+                  {webSocket.isConnected ? 'Live' : 'Offline'}
+                </span>
+              </div>
               
-              <button 
-                className="p-2 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"
-                title="Portfolio Value"
+              {/* Notification Center */}
+              <NotificationCenter />
+              
+              
+              <button
+                onClick={() => setIsExportModalOpen(true)}
+                className="px-4 py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors"
               >
-                <DollarSign className="w-4 h-4 text-gray-600" />
-              </button>
-              
-              <button className="px-4 py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors">
                 Export
               </button>
             </div>
@@ -138,6 +182,12 @@ export default function DashboardLayout({ children, activeView, setActiveView }:
           {children}
         </div>
       </main>
+      
+      {/* Export Modal */}
+      <ExportModal
+        isOpen={isExportModalOpen}
+        onClose={() => setIsExportModalOpen(false)}
+      />
     </div>
   );
 }
