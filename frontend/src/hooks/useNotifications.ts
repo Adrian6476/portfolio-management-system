@@ -48,7 +48,7 @@ export const useNotifications = (limit = 50, offset = 0) => {
   return useQuery<NotificationsResponse, Error>(
     [NOTIFICATIONS_QUERY_KEYS.NOTIFICATIONS, limit, offset],
     async () => {
-      const { data } = await apiClient.get(`/notifications/?limit=${limit}&offset=${offset}`);
+      const { data } = await apiClient.get(`/notifications?limit=${limit}&offset=${offset}`);
       return data;
     },
     {
