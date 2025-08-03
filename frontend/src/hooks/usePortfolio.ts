@@ -268,29 +268,24 @@ enabled: !!symbol, // Only fetch if symbol exists
 
   
 
-// Setup WebSocket for real-time updates
+    // Setup WebSocket for real-time updates
+    React.useEffect(() => {
+      if (!symbol) return;
+      
+      const baseUrl = process.env.NEXT_PUBLIC_API_URL;
+      
+      if (!baseUrl) {
+        console.error('NEXT_PUBLIC_API_URL environment variable is not set');
+        return;
+      }
+      
+      // Extract the domain and protocol from the API URL
+      const url = new URL(baseUrl);
+      const wsProtocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+      // WebSocket endpoint is at /ws (Nginx routes this to /api/v1/ws on backend)
+      const wsUrl = `${wsProtocol}//${url.host}/ws`;
 
-React.useEffect(() => {
-
-if (!symbol) return;
-
-  
-
-const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api/v1';
-
-const wsUrl = baseUrl
-
-.replace('http://', 'ws://')
-
-.replace('https://', 'wss://')
-
-+ '/ws'; // Append /ws to the full API path
-
-  
-
-const ws = new WebSocket(wsUrl);
-
-  
+      const ws = new WebSocket(wsUrl);  
 
 ws.onopen = () => {
 

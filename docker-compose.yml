@@ -7,13 +7,13 @@ services:
       POSTGRES_DB: portfolio_db
       POSTGRES_USER: portfolio_user
       POSTGRES_PASSWORD: portfolio_pass
-    ports:
-      - "5432:5432"
+    # Remove port mappings for production, internal network only
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     networks:
       - portfolio_network
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U portfolio_user -d portfolio_db"]
       interval: 30s
@@ -23,28 +23,25 @@ services:
   redis:
     image: crpi-uq4h40nqjrf2s1wo.cn-qingdao.personal.cr.aliyuncs.com/ghcr_io/redis:7-alpine
     container_name: portfolio_redis
-    ports:
-      - "6379:6379"
+    # Remove port mappings for production, internal network only
     volumes:
       - redis_data:/data
     networks:
       - portfolio_network
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 30s
       timeout: 10s
       retries: 3
 
-  # Message Broker
   nats:
     image: crpi-uq4h40nqjrf2s1wo.cn-qingdao.personal.cr.aliyuncs.com/ghcr_io/nats:2.10-alpine
     container_name: portfolio_nats
-    ports:
-      - "4222:4222"
-      - "8222:8222"
-      - "6222:6222"
+    # Remove port mappings for production, internal network only
     networks:
       - portfolio_network
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8222/"]
       interval: 30s
@@ -58,7 +55,7 @@ services:
       dockerfile: Dockerfile
     container_name: portfolio_api_gateway
     ports:
-      - "8080:8080"
+      - "13001:8080"  # New port binding
     environment:
       - PORT=8080
       - POSTGRES_URL=postgres://portfolio_user:portfolio_pass@postgres:5432/portfolio_db?sslmode=disable
@@ -76,9 +73,8 @@ services:
         condition: service_healthy
     networks:
       - portfolio_network
+      - appnet  # Connect to nginx network
     restart: unless-stopped
-    healthcheck:
-      test: ["NONE"]
 
 volumes:
   postgres_data:
@@ -87,3 +83,5 @@ volumes:
 networks:
   portfolio_network:
     driver: bridge
+  appnet:
+    external: true  # Use existing appnet network

@@ -372,15 +372,11 @@ const [deletingHolding, setDeletingHolding] = useState<Holding | null>(null);
 
 const updateHolding = useUpdateHolding();
 
-const deleteHolding = useDeleteHolding();
+  const deleteHolding = useDeleteHolding();
+  // WebSocket connection for real-time updates
+  const webSocket = usePortfolioWebSocket(true);
 
-// WebSocket connection for real-time updates
-
-const webSocket = usePortfolioWebSocket(true);
-
-  
-
-if (isLoading) return (
+  if (isLoading) return (
 
 <div className="flex justify-center items-center h-64" role="status" aria-label="Loading holdings data">
 

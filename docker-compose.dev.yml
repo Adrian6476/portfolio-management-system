@@ -1,0 +1,26 @@
+# Development overrides for docker-compose.yml
+# This file is automatically loaded by docker-compose in development
+version: '3.8'
+
+services:
+  # Development: expose database ports for debugging
+  postgres:
+    ports:
+      - "15432:5432"  # Use different port to avoid conflicts
+
+  redis:
+    ports:
+      - "16379:6379"  # Use different port to avoid conflicts
+
+  nats:
+    ports:
+      - "14222:4222"  # Use different port to avoid conflicts
+      - "18222:8222"  # NATS monitoring port
+
+  # Development: add volume mounts for hot reloading
+  api-gateway:
+    volumes:
+      - ./services/api-gateway:/app:cached
+    environment:
+      - GO_ENV=development
+      - DEBUG=true

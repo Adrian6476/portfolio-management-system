@@ -49,11 +49,17 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('disconnected');
 
   const getWebSocketUrl = useCallback(() => {
-    const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api/v1';
-    const wsUrl = baseUrl
-      .replace('http://', 'ws://')
-      .replace('https://', 'wss://')
-      + '/ws'; // Append /ws to the full API path
+    const baseUrl = process.env.NEXT_PUBLIC_API_URL;
+    
+    if (!baseUrl) {
+      throw new Error('NEXT_PUBLIC_API_URL environment variable is not set');
+    }
+    
+    // Extract the domain and protocol from the API URL
+    const url = new URL(baseUrl);
+    const wsProtocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    // WebSocket endpoint is at /ws (Nginx routes this to /api/v1/ws on backend)
+    const wsUrl = `${wsProtocol}//${url.host}/ws`;
     return wsUrl;
   }, []);
 
